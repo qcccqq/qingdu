@@ -18,7 +18,10 @@ function fileIOWriteWithBackup(path, bytes) {
 
 var els = {
   stage: document.getElementById('stage'),
-  dropzone: document.getElementById('dropzone'),
+  home: document.getElementById('home'),
+  homeRecentList: document.getElementById('home-recent-list'),
+  homeVer: document.getElementById('home-ver'),
+  btnOpenHero: document.getElementById('btn-open-hero'),
   viewer: document.getElementById('viewer'),
   error: document.getElementById('error'),
   filename: document.getElementById('filename'),
@@ -205,11 +208,64 @@ function openByPath(path) {
 }
 
 /* ================= 打开与渲染 ================= */
+/* ================= 视图切换与首页 ================= */
+function showHome() {
+  els.home.hidden = false;
+  els.viewer.hidden = true;
+  els.error.hidden = true;
+  setGroups(false);
+  fillHomeVersion();
+  renderHomeRecents();
+}
+function hideHome() { els.home.hidden = true; }
+function fillHomeVersion() {
+  var v = '浏览器版';
+  if (IS_TAURI) { try { v = 'v' + window.__TAURI__.app.getVersion(); } catch (e) {} }
+  els.homeVer.textContent = '轻读 ' + v;
+}
+function renderHomeRecents() {
+  var list = els.homeRecentList;
+  list.innerHTML = '';
+  function addRow(content, title, onOpen, onDel) {
+    var row = document.createElement('div');
+    row.className = 'hr-item';
+    var ic = document.createElement('span'); ic.className = 'ic'; ic.textContent = '📄';
+    var nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = content; nm.title = title || content;
+    row.appendChild(ic); row.appendChild(nm);
+    if (onDel) {
+      var del = document.createElement('span'); del.className = 'del'; del.textContent = '×';
+      del.title = '从列表移除';
+      del.addEventListener('click', function (e) { e.stopPropagation(); onDel(); });
+      row.appendChild(del);
+    }
+    if (onOpen) row.addEventListener('click', onOpen);
+    list.appendChild(row);
+  }
+  if (IS_TAURI) {
+    var paths = lsGetRecents();
+    if (!paths.length) { var e1 = document.createElement('div'); e1.className = 'hr-empty'; e1.textContent = '暂无记录'; list.appendChild(e1); return; }
+    paths.forEach(function (p) {
+      addRow(p.split(/[\\/]/).pop(), p, function () { openByPath(p); }, function () {
+        lsSaveRecents(lsGetRecents().filter(function (x) { return x !== p; }));
+        renderHomeRecents();
+      });
+    });
+  } else {
+    getIdbRecents().then(function (items) {
+      if (!items.length) { var e2 = document.createElement('div'); e2.className = 'hr-empty'; e2.textContent = '暂无记录'; list.appendChild(e2); return; }
+      items.forEach(function (item) {
+        addRow(item.name, item.name, item.handle ? function () { openByHandle(item.handle); } : null,
+               function () { delIdbRecent(item.name).then(renderHomeRecents); });
+      });
+    });
+  }
+}
+
 function showError(msg) {
   els.error.textContent = msg;
   els.error.hidden = false;
-  els.dropzone.hidden = false;
-  els.viewer.hidden = true;
+  showHome();
+  els.error.hidden = false;
   setGroups(false);
 }
 function clearError() { els.error.hidden = true; }
@@ -376,8 +432,11 @@ async function renderCurrent() {
   });
   document.title = state.name + ' · 轻读';
   els.filename.textContent = state.name;
-  els.dropzone.hidden = true;
+  hideHome();
   els.viewer.hidden = false;
+  els.viewer.classList.remove('doc-in');
+  void els.viewer.offsetWidth;
+  els.viewer.classList.add('doc-in');
   setGroups(true);
   setZoom(1);
   enhanceWhenReady().then(function () {
@@ -704,7 +763,7 @@ els.btnOpen.addEventListener('click', function () {
     els.fileInput.click();
   }
 });
-els.dropzone.addEventListener('click', function () { els.btnOpen.click(); });
+els.btnOpenHero.addEventListener('click', function () { els.btnOpen.click(); });
 els.fileInput.addEventListener('change', function () {
   var f = els.fileInput.files && els.fileInput.files[0];
   if (f) openFile(f);
@@ -850,5 +909,8 @@ if (IS_TAURI) {
     if (e.payload) openByPath(e.payload);
   });
 }
+
+/* ================= 启动：渲染首页 ================= */
+showHome();
 
 
