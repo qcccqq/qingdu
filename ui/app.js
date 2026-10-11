@@ -429,8 +429,9 @@ function fixHeaderWatermarks() {
     });
     var art = sec.querySelector(':scope > article');
     if (!art) return;
-    var pageH = sec.clientHeight || 1123;
-    var topMargin = Math.round(pageH / 1123 * 96);        // 上边距约 1 英寸
+    // 上边距恒为 1 英寸=96px（连续长页模式下 clientHeight 是全内容高度，
+    // 绝不能按比例推算——否则文档越长顶部空白越大，正文被推出首屏）
+    var topMargin = 96;
     if (art.offsetTop < topMargin) art.style.marginTop = (topMargin - art.offsetTop) + 'px';
   });
 }
@@ -728,4 +729,5 @@ if (IS_TAURI) {
     if (e.payload) openByPath(e.payload);
   });
 }
+
 
