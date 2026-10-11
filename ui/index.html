@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>轻读 · Word 快速阅读器</title>
+<!--
+  轻读 — Word 快速阅读器
+  本应用内嵌以下开源库（均从 npm 官方源下载并经 SHA-512 完整性校验）：
+  1. JSZip 3.10.2 —— MIT License（本应用选择 MIT 条款）
+     Copyright (c) 2009-2016 Stuart Knightley, David Duponchel, Franz Buchinger, Antonio Afonso
+  2. docx-preview 0.4.1 —— Apache License 2.0
+     Copyright Volodymyr Baydalka  https://github.com/VolodymyrBaydalka/docxjs
+  3. fflate 0.8.3 —— MIT License
+     Copyright (c) 2021 Arjun Barrett
+  其余部分为原创代码。
+-->
+<style>
+:root {
+  --topbar-h: 52px;
+  --accent: #2e74b5;
+  --bg: #808080;
+  --line: #e0e0e0;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  background: var(--bg);
+  overflow: hidden;
+}
+#topbar {
+  height: var(--topbar-h);
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  user-select: none;
+}
+#brand { font-size: 19px; font-weight: 700; color: var(--accent); letter-spacing: 1px; }
+#filename {
+  flex: 1; min-width: 60px;
+  color: #444; font-size: 13px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.group { display: none; align-items: center; gap: 4px; }
+.group.on { display: flex; }
+.tbtn {
+  min-width: 26px; height: 26px;
+  padding: 0 6px;
+  border: 1px solid #d0d0d0; border-radius: 6px;
+  background: #fff; cursor: pointer;
+  font-size: 12px; color: #333;
+  line-height: 1;
+}
+.tbtn:hover:not(:disabled) { background: #f2f6fb; border-color: var(--accent); }
+.tbtn:disabled { color: #bbb; cursor: default; }
+#search-box { display: flex; align-items: center; gap: 4px; }
+#search-input {
+  width: 150px; height: 28px;
+  border: 1px solid #d0d0d0; border-radius: 6px;
+  padding: 0 8px; font-size: 13px;
+  outline: none;
+}
+#search-input:focus { border-color: var(--accent); }
+#hit-count { font-size: 12px; color: #666; min-width: 44px; text-align: center; }
+#page-ind { font-size: 12px; color: #555; white-space: nowrap; }
+#zoomval { font-size: 12px; color: #666; min-width: 40px; text-align: center; }
+#btn-open {
+  height: 32px; padding: 0 14px;
+  border: none; border-radius: 7px;
+  background: var(--accent); color: #fff;
+  font-size: 13px; cursor: pointer;
+  white-space: nowrap;
+}
+#btn-open:hover { filter: brightness(1.1); }
+#btn-recents { position: relative; }
+#recent-menu {
+  position: absolute;
+  top: 34px; right: 0;
+  width: 280px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0,0,0,.15);
+  padding: 6px;
+  display: none;
+  z-index: 50;
+}
+#recent-menu.on { display: block; }
+#recent-menu .rm-empty { padding: 12px; text-align: center; color: #999; font-size: 12px; }
+#recent-menu .rm-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-radius: 6px;
+  cursor: pointer; font-size: 13px; color: #333;
+}
+#recent-menu .rm-item:hover { background: #f2f6fb; }
+#recent-menu .rm-item .rm-name {
+  flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#recent-menu .rm-item .rm-del {
+  width: 20px; height: 20px; line-height: 18px;
+  text-align: center; border-radius: 50%;
+  color: #bbb; font-size: 13px;
+}
+#recent-menu .rm-item .rm-del:hover { background: #fee; color: #c33; }
+#stage {
+  position: absolute;
+  top: var(--topbar-h);
+  left: 0; right: 0; bottom: 0;
+  overflow: auto;
+}
+#stage::-webkit-scrollbar { width: 12px; height: 12px; }
+#stage::-webkit-scrollbar-thumb { background: #aab2bd; border-radius: 6px; border: 3px solid var(--bg); }
+#stage::-webkit-scrollbar-track { background: transparent; }
+#dropzone {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  cursor: pointer;
+}
+#dropzone[hidden] { display: none; }
+#dropzone .dz-icon { font-size: 64px; }
+#dropzone .dz-title { font-size: 22px; color: #fff; font-weight: 600; }
+#dropzone .dz-hint { font-size: 13px; color: rgba(255,255,255,.85); }
+#stage.dragging::after {
+  content: "";
+  position: absolute; inset: 10px;
+  border: 3px dashed #cfe3f7;
+  border-radius: 10px;
+  pointer-events: none;
+}
+#viewer { min-height: 100%; }
+#viewer[hidden] { display: none; }
+mark.qdu-hit { background: #ffe066; color: inherit; padding: 0; }
+mark.qdu-hit.qdu-cur { background: #ff8c69; }
+#error {
+  margin: 80px auto;
+  max-width: 460px;
+  background: #fff4f4;
+  border: 1px solid #e8b4b4;
+  border-radius: 10px;
+  padding: 18px 22px;
+  color: #a33;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+#error[hidden] { display: none; }
+</style>
+</head>
+<body>
+<header id="topbar">
+  <div id="brand">轻读</div>
+  <div id="filename"></div>
+  <div id="search-box" class="group">
+    <input id="search-input" type="text" placeholder="搜索 (Ctrl+F)" disabled>
+    <span id="hit-count"></span>
+    <button class="tbtn" id="hit-prev" title="上一个 (Shift+Enter)" disabled>↑</button>
+    <button class="tbtn" id="hit-next" title="下一个 (Enter)" disabled>↓</button>
+  </div>
+  <div id="page-box" class="group">
+    <button class="tbtn" id="page-prev" title="上一页" disabled>‹</button>
+    <span id="page-ind">- / -</span>
+    <button class="tbtn" id="page-next" title="下一页" disabled>›</button>
+  </div>
+  <div id="zoom-box" class="group">
+    <button class="tbtn" id="zoom-out" title="缩小 (Ctrl+-)">−</button>
+    <span id="zoomval">100%</span>
+    <button class="tbtn" id="zoom-in" title="放大 (Ctrl++)">＋</button>
+    <button class="tbtn" id="zoom-fit" title="适应宽度" style="width:auto">适宽</button>
+  </div>
+  <button class="tbtn" id="btn-recents" title="最近打开">最近 ▾</button>
+  <div id="recent-menu"></div>
+  <button id="btn-open">打开文档</button>
+  <input type="file" id="file-input" accept=".docx" hidden>
+</header>
+<main id="stage">
+  <div id="dropzone" title="点击选择文件">
+    <div class="dz-icon">📄</div>
+    <div class="dz-title">把 Word 文档拖到这里</div>
+    <div class="dz-hint">或点击右上角「打开文档」 · 支持 .docx（.doc 老格式不在支持范围）</div>
+  </div>
+  <div id="viewer" hidden></div>
+  <div id="error" hidden></div>
+</main>
+<script src="libs/jszip.min.js"></script>
+<script src="libs/docx-preview.min.js"></script>
+<script src="libs/fflate.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

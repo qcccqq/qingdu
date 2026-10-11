@@ -1,0 +1,7 @@
+# Rust / Tauri 构建产物
+src-tauri/target/
+src-tauri/gen/
+
+# 系统杂项
+Thumbs.db
+.DS_Store
