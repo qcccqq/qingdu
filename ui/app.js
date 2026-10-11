@@ -568,6 +568,9 @@ window.addEventListener('resize', function () {
 
 function fixHeaderWatermarks() {
   document.querySelectorAll('#viewer section.docx').forEach(function (sec) {
+    // 层级修正：正文必须在页眉水印/页脚之上（docx 默认样式给了 z-index 却没给定位，等于没生效）
+    var artAll = sec.querySelector(':scope > article');
+    if (artAll) { artAll.style.position = 'relative'; artAll.style.zIndex = '1'; }
     sec.querySelectorAll(':scope > header').forEach(function (h) {
       var big = h.querySelector('img');
       // 用 naturalWidth 判断（不依赖图片是否已完成布局），≥300px 视为水印/大图页眉
@@ -577,6 +580,7 @@ function fixHeaderWatermarks() {
       h.style.zIndex = '0'; h.style.pointerEvents = 'none';
       big.style.display = 'block';
       big.style.margin = '0 auto';                        // 水印水平居中
+      big.style.maxWidth = 'none';
     });
     var art = sec.querySelector(':scope > article');
     if (!art) return;
@@ -607,16 +611,24 @@ function paginateAll() {
 
 function paginateSection(section) {
   var guard = 0;
-  while (section.scrollHeight > section.clientHeight + 2 && guard++ < 30) {
+  while (guard++ < 60) {
     var art = section.querySelector(':scope > article');
     if (!art) break;
-    var pageH = section.clientHeight;
-    var bottom = pageH - Math.round(pageH / 1123 * 96);   // 底边距约 1 英寸
+    // 目标页高：docx-preview 写入的 min-height（A4 ≈ 1122.53px）。
+    // 内容一旦超过“页高 - 底边距”，就在安全位置切分到下一页（保持纸张 A4 比例）。
+    var csSec = getComputedStyle(section);
+    var pageH = parseFloat(csSec.minHeight) || section.clientHeight || 1123;
+    var padBottom = parseFloat(csSec.paddingBottom) || 0;
+    var bottom = pageH - padBottom - 2;
     var kids = [].slice.call(art.children);
     var cutEl = null, cutRow = -1, cutIdx = -1;
     for (var i = 0; i < kids.length; i++) {
       var el = kids[i];
-      if (el.offsetTop + el.offsetHeight <= bottom) continue;
+      // 元素底界要包含自身的下外边距（否则段落 spacing after 会被漏算，页高超出 A4）
+      var mb = parseFloat(getComputedStyle(el).marginBottom) || 0;
+      var elBottom = el.offsetTop + el.offsetHeight + mb;
+      if (el.offsetTop >= bottom) { cutEl = el; cutRow = -1; cutIdx = i; break; }   // 完全在页外
+      if (elBottom <= bottom) continue;
       if (el.tagName === 'TABLE') {
         var rows = [].slice.call(el.rows);
         var best = -1;
@@ -647,11 +659,13 @@ function paginateSection(section) {
       if (thead) contTable.appendChild(thead.cloneNode(true));
       rowsAll.slice(cutRow).forEach(function (r3) { contTable.appendChild(r3); });
       contArt.appendChild(contTable);
+    } else {
+      contArt.appendChild(cutEl);                         // 段落整块挪到下一页
     }
     carry.slice(cutIdx + 1).forEach(function (c) { contArt.appendChild(c); });
-    // 原页截断：从切点开始清理（已挪去续页的元素不在 art 里，自动跳过）
+    // 原页截断：按移动前的快照清理（cutEl 若已挪走则跳过；表格切分行保留）
     var keepCut = cutRow >= 0;                            // 表格切分行：原表本体保留
-    [].slice.call(art.children).slice(cutIdx + (keepCut ? 1 : 0)).forEach(function (s2) {
+    carry.slice(cutIdx + (keepCut ? 1 : 0)).forEach(function (s2) {
       if (s2.parentNode === art) art.removeChild(s2);
     });
     section.parentNode.insertBefore(cont, section.nextSibling);
@@ -699,17 +713,20 @@ function renderFloatingAnchors() {
     var doc = new DOMParser().parseFromString(docXml, 'application/xml');
     var body = doc.getElementsByTagName('w:body')[0];
     if (!body) return;
-    // body 直接子元素序号 ↔ 渲染层 article 直接子元素序号 一一对应（已实测验证）
-    var kids = [].filter.call(body.children, function (c) { return c.tagName !== 'w:sectPr'; });
-    var sec = els.viewer.querySelector('section.docx');
-    var art = sec && sec.querySelector(':scope > article');
-    if (!sec || !art) return;
-    var artKids = art.children;
-    kids.forEach(function (child, idx) {
+    // body 直接子元素序号 ↔ 渲染层各节 article 子元素的拼接顺序一一对应（已实测验证）
+    var allArtKids = [];
+    els.viewer.querySelectorAll(':scope > section.docx').forEach(function (s) {
+      var a = s.querySelector(':scope > article');
+      if (a) [].forEach.call(a.children, function (c) { allArtKids.push(c); });
+    });
+    var bodyKids = [].filter.call(body.children, function (c) { return c.tagName !== 'w:sectPr'; });
+    bodyKids.forEach(function (child, idx) {
       var anchors = child.getElementsByTagName ? child.getElementsByTagName('wp:anchor') : [];
       if (!anchors.length) return;
-      var refEl = artKids[idx];
+      var refEl = allArtKids[idx];
       if (!refEl) return;
+      var sec = refEl.closest('section.docx');
+      if (!sec) return;
       [].forEach.call(anchors, function (an) {
         var blip = an.getElementsByTagName('a:blip')[0];
         if (!blip) return;
