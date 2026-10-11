@@ -367,9 +367,99 @@ async function renderCurrent() {
   els.dropzone.hidden = true;
   els.viewer.hidden = false;
   setGroups(true);
+  fixHeaderWatermarks();
+  paginateAll();
   setZoom(1);
   updatePageInd();
   if (lastQuery) doSearch(lastQuery);
+}
+
+/* ============ 渲染后增强：水印页眉转背景 + 长表智能分页 ============ */
+function fixHeaderWatermarks() {
+  document.querySelectorAll('#viewer section.docx').forEach(function (sec) {
+    sec.querySelectorAll(':scope > header').forEach(function (h) {
+      var big = h.querySelector('img');
+      if (!big || (big.offsetWidth || 0) < 200) return;   // 小页眉保持原样
+      h.style.position = 'absolute';
+      h.style.top = '0'; h.style.left = '0'; h.style.right = '0';
+      h.style.zIndex = '0'; h.style.pointerEvents = 'none';
+      big.style.display = 'block';
+      big.style.margin = '0 auto';                        // 水印水平居中
+    });
+    var art = sec.querySelector(':scope > article');
+    if (!art) return;
+    var pageH = sec.clientHeight || 1123;
+    var topMargin = Math.round(pageH / 1123 * 96);        // 上边距约 1 英寸
+    if (art.offsetTop < topMargin) art.style.marginTop = (topMargin - art.offsetTop) + 'px';
+  });
+}
+
+function rowsCoverBoundary(rows, k) {
+  // 是否有跨行合并单元格跨越 k-1|k 行边界（有则不能在此处切表）
+  for (var i = 0; i < rows.length && i < k; i++) {
+    var cells = rows[i].cells;
+    for (var j = 0; j < cells.length; j++) {
+      var rs = parseInt(cells[j].getAttribute('rowspan') || '1', 10);
+      if (i < k && i + rs - 1 >= k) return true;
+    }
+  }
+  return false;
+}
+
+function paginateAll() {
+  var wrapper = els.viewer.querySelector('.docx-wrapper');
+  if (!wrapper) return;
+  [].slice.call(wrapper.querySelectorAll(':scope > section.docx')).forEach(paginateSection);
+}
+
+function paginateSection(section) {
+  var guard = 0;
+  while (section.scrollHeight > section.clientHeight + 2 && guard++ < 30) {
+    var art = section.querySelector(':scope > article');
+    if (!art) break;
+    var pageH = section.clientHeight;
+    var bottom = pageH - Math.round(pageH / 1123 * 96);   // 底边距约 1 英寸
+    var kids = [].slice.call(art.children);
+    var cutEl = null, cutRow = -1, cutIdx = -1;
+    for (var i = 0; i < kids.length; i++) {
+      var el = kids[i];
+      if (el.offsetTop + el.offsetHeight <= bottom) continue;
+      if (el.tagName === 'TABLE') {
+        var rows = [].slice.call(el.rows);
+        var best = -1;
+        for (var r2 = rows.length - 2; r2 >= 0; r2--) {
+          var rb = rows[r2].offsetTop + rows[r2].offsetHeight;
+          if (rb <= bottom && !rowsCoverBoundary(rows, r2 + 1)) { best = r2; break; }
+        }
+        if (best >= 0) { cutEl = el; cutRow = best + 1; cutIdx = i; break; }
+      }
+      cutEl = el; cutRow = -1; cutIdx = i; break;         // 段落整块挪到下一页
+    }
+    if (!cutEl) break;
+    // 构造续页：克隆整节（含页眉页脚与样式），只留续行与后续内容
+    var cont = section.cloneNode(true);
+    var contArt = cont.querySelector(':scope > article');
+    contArt.innerHTML = '';
+    var carry = [].slice.call(art.children);
+    if (cutRow >= 0) {
+      var rowsAll = [].slice.call(cutEl.rows);
+      var contTable = cutEl.cloneNode(false);             // 表格属性与样式
+      var cg = cutEl.querySelector('colgroup');
+      if (cg) contTable.appendChild(cg.cloneNode(true));
+      var thead = cutEl.querySelector('thead');
+      if (thead) contTable.appendChild(thead.cloneNode(true));
+      rowsAll.slice(cutRow).forEach(function (r3) { contTable.appendChild(r3); });
+      contArt.appendChild(contTable);
+    }
+    carry.slice(cutIdx + 1).forEach(function (c) { contArt.appendChild(c); });
+    // 原页截断：从切点开始清理（已挪去续页的元素不在 art 里，自动跳过）
+    var keepCut = cutRow >= 0;                            // 表格切分行：原表本体保留
+    [].slice.call(art.children).slice(cutIdx + (keepCut ? 1 : 0)).forEach(function (s2) {
+      if (s2.parentNode === art) art.removeChild(s2);
+    });
+    section.parentNode.insertBefore(cont, section.nextSibling);
+    section = cont;
+  }
 }
 
 /* ================= 事件绑定 ================= */
