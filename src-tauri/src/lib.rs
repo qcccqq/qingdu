@@ -51,8 +51,9 @@ struct UpdateInfo {
     version: String,
 }
 
-/// 检查更新：读取仓库最新 Release 的 version.json，与当前版本比较
-#[tauri::command]
+/// 检查更新：读取仓库最新 Release 的 version.json，与当前版本比较。
+/// 【async】网络调用必须放后台线程——同步命令会阻塞主线程导致界面卡死。
+#[tauri::command(async)]
 fn check_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
     let current = app.package_info().version.to_string();
     let resp = ureq::get(&format!("{}/version.json", UPDATE_BASE))
@@ -81,19 +82,42 @@ fn check_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
     })
 }
 
-/// 执行更新：下载安装包与校验清单，SHA-256 一致才启动安装器
-#[tauri::command]
-fn perform_update() -> Result<(), String> {
-    let dl = |name: &str| -> Result<Vec<u8>, String> {
+/// 执行更新：下载安装包与校验清单，SHA-256 一致才启动安装器。
+/// 【async】下载耗时长，同样必须后台执行；进度通过事件实时推给前端。
+#[tauri::command(async)]
+fn perform_update(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Emitter;
+    let emit = |stage: &str, detail: String| -> () {
+        let _ = app.emit("update-log", format!("{}|{}", stage, detail));
+    };
+    let dl = |name: &str, app: &tauri::AppHandle| -> Result<Vec<u8>, String> {
         let resp = ureq::get(&format!("{}/{}", UPDATE_BASE, name))
             .timeout(std::time::Duration::from_secs(600))
             .call();
         match resp {
             Ok(r) => {
+                let total = r.header("Content-Length")
+                    .and_then(|v| v.parse::<usize>().ok());
                 let mut reader = r.into_reader();
-                let mut buf = Vec::new();
-                std::io::copy(&mut reader, &mut buf)
-                    .map_err(|e| format!("读取 {} 失败: {}", name, e))?;
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 65536];
+                let mut last_emit = 0usize;
+                emit("download", format!("开始下载 {}", name));
+                loop {
+                    let n = reader
+                        .read(&mut chunk)
+                        .map_err(|e| format!("读取 {} 失败: {}", name, e))?;
+                    if n == 0 { break; }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.len() - last_emit >= 512 * 1024 {
+                        last_emit = buf.len();
+                        match total {
+                            Some(t) => emit("download", format!("进度 {}/{} KB", buf.len() / 1024, t / 1024)),
+                            None => emit("download", format!("已下载 {} KB", buf.len() / 1024)),
+                        }
+                    }
+                }
+                emit("download", format!("{} 下载完成（{} KB）", name, buf.len() / 1024));
                 Ok(buf)
             }
             Err(ureq::Error::Status(404, _)) => Err("更新通道尚未就绪（云端还没有已发布的版本）".into()),
@@ -101,7 +125,8 @@ fn perform_update() -> Result<(), String> {
             Err(e) => Err(format!("下载 {} 失败: {}", name, e)),
         }
     };
-    let manifest = dl("version.json")?;
+    emit("step", "开始检查更新…");
+    let manifest = dl("version.json", &app)?;
     let manifest = String::from_utf8_lossy(&manifest);
     let manifest = manifest.trim_start_matches('\u{feff}');
     let v: serde_json::Value = serde_json::from_str(manifest).map_err(|e| format!("更新信息格式异常: {}", e))?;
@@ -109,16 +134,21 @@ fn perform_update() -> Result<(), String> {
     if expect.len() != 64 {
         return Err("更新清单缺少校验值，已取消更新".into());
     }
-    let exe = dl("qingdu-Setup.exe")?;
-    if sha256_hex(&exe) != expect {
-        return Err("安装包校验不一致（可能下载不完整），已取消更新".into());
+    emit("step", format!("远端版本 {}，开始下载安装包", v["version"].as_str().unwrap_or("?")));
+    let exe = dl("qingdu-Setup.exe", &app)?;
+    let actual = sha256_hex(&exe);
+    emit("step", "校验安装包完整性（SHA-256）…");
+    if actual != expect {
+        return Err(format!("安装包校验不一致（{} ≠ {}），已取消更新", &actual[..12], &expect[..12]));
     }
     let path = std::env::temp_dir().join("qingdu-Setup.exe");
     std::fs::write(&path, &exe).map_err(|e| format!("保存失败: {}", e))?;
+    emit("step", "校验通过，启动安装器…");
     std::process::Command::new(&path)
         .spawn()
         .map_err(|e| format!("启动安装器失败: {}", e))?;
-    std::process::exit(0);
+    app.exit(0);
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

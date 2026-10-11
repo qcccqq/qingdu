@@ -152,6 +152,19 @@ mark.qdu-hit.qdu-cur { background: #ff8c69; }
   white-space: pre-wrap;
 }
 #error[hidden] { display: none; }
+#update-panel {
+  position: fixed; right: 14px; top: 60px; width: 330px;
+  background: #1f2430; color: #d8e0ea; border-radius: 10px;
+  padding: 12px 14px; font-size: 12px; line-height: 1.7;
+  box-shadow: 0 8px 30px rgba(0,0,0,.35); z-index: 100;
+  display: none; max-height: 320px; overflow: auto;
+}
+#update-panel.on { display: block; }
+#update-panel .up-title { font-weight: 700; color: #fff; margin-bottom: 6px; font-size: 13px; }
+#update-panel .up-line { white-space: pre-wrap; word-break: break-all; }
+#update-panel .up-line.err { color: #ff9c9c; }
+#update-panel .up-line.ok { color: #9fe0a8; }
+
 </style>
 </head>
 <body>
@@ -190,6 +203,7 @@ mark.qdu-hit.qdu-cur { background: #ff8c69; }
   <div id="viewer" hidden></div>
   <div id="error" hidden></div>
 </main>
+<div id="update-panel"><div class="up-title">更新日志</div><div id="up-log"></div></div>
 <script src="libs/jszip.min.js"></script>
 <script src="libs/docx-preview.min.js"></script>
 <script src="libs/fflate.min.js"></script>
