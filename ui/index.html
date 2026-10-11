@@ -21,6 +21,11 @@
   --accent: #2e74b5;
   --bg: #808080;
   --line: #e0e0e0;
+  /* 动效令牌：统一时长与缓动（所有新动画必须引用） */
+  --dur-fast: 120ms;      /* 微交互：按钮反馈 */
+  --dur-normal: 200ms;    /* 面板：hover/展开 */
+  --dur-slow: 320ms;      /* 场景：保存成功/入场 */
+  --ease: cubic-bezier(0.2, 0, 0, 1);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
@@ -44,7 +49,18 @@ body {
   flex: 1; min-width: 60px;
   color: #444; font-size: 13px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;   /* 页码/耗时数字等宽不抖 */
 }
+#filename.dirty::before {
+  content: "● ";
+  color: #e8a33d;
+  animation: dirtyPulse 1.6s ease-in-out infinite;
+}
+@keyframes dirtyPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .35; }
+}
+::selection { background: rgba(46,116,181,.25); }
 .group {
   display: none;
   align-items: center;
@@ -60,6 +76,8 @@ body {
   line-height: 1;
 }
 .tbtn:hover:not(:disabled) { background: #f2f6fb; border-color: var(--accent); }
+.tbtn:active:not(:disabled), .ebtn:active:not(:disabled) { transform: scale(.94); }
+.tbtn, .ebtn { transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease); }
 .tbtn:disabled { color: #bbb; cursor: default; }
 #search-box { display: flex; align-items: center; gap: 4px; }
 #search-input {
@@ -155,9 +173,10 @@ body {
   background: linear-gradient(135deg, #2e74b5, #1e5799);
   box-shadow: 0 10px 30px rgba(46,116,181,.4), inset 0 1px 0 rgba(255,255,255,.25);
   display: flex; align-items: center; justify-content: center;
-  font-size: 44px;
   animation: floatDoc 5s ease-in-out infinite;
 }
+.hero-mark svg { width: 46px; height: 46px; }
+.ico { width: 14px; height: 14px; vertical-align: -2px; margin-right: 5px; }
 .hero-title { font-size: 34px; font-weight: 700; letter-spacing: 6px; margin-bottom: 8px; }
 .hero-sub { font-size: 14px; color: rgba(255,255,255,.75); margin-bottom: 26px; }
 .hero-actions { margin-bottom: 10px; }
@@ -208,7 +227,12 @@ body {
 #viewer[hidden] { display: none; }
 #viewer.doc-in .docx-wrapper { animation: docIn .35s ease both; }
 mark.qdu-hit { background: #ffe066; color: inherit; padding: 0; }
-mark.qdu-hit.qdu-cur { background: #ff8c69; }
+mark.qdu-hit.qdu-cur { background: #ff8c69; animation: hitBounce var(--dur-slow) var(--ease); }
+@keyframes hitBounce {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.12); }
+  100% { transform: scale(1); }
+}
 #error {
   margin: 80px auto;
   max-width: 460px;
@@ -238,6 +262,32 @@ mark.qdu-hit.qdu-cur { background: #ff8c69; }
   z-index: 40; display: none;
 }
 #edit-tip.on { display: block; }
+
+/* ============ 打开骨架屏（性能感知优化） ============ */
+#skeleton {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  padding: 48px 0;
+  gap: 24px;
+}
+#skeleton.on { display: flex; }
+.sk-page {
+  width: 692px; max-width: 88%;
+  background: #fff; border-radius: 2px;
+  position: relative; overflow: hidden;
+  box-shadow: 0 2px 12px rgba(0,0,0,.18);
+}
+.sk-page::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(100deg, transparent 30%, rgba(255,255,255,.65) 50%, transparent 70%);
+  animation: skShine 1.4s ease-in-out infinite;
+  transform: translateX(-100%);
+}
+@keyframes skShine { to { transform: translateX(100%); } }
+.sk-line { height: 10px; border-radius: 5px; background: #e8e8e8; margin: 14px 56px; }
+.sk-line.w60 { width: 60%; margin-left: auto; margin-right: auto; }
+.sk-line.w35 { width: 35%; }
 body.editing #viewer p[contenteditable] {
   outline: 1px dashed rgba(46,116,181,.55);
   outline-offset: 2px;
@@ -247,9 +297,17 @@ body.editing #viewer p[contenteditable]:hover {
   outline: 1px solid rgba(46,116,181,.8);
   background: rgba(46,116,181,.05);
 }
+body.editing #viewer p[contenteditable] {
+  transition: outline-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
 body.editing #viewer p[contenteditable]:focus {
   outline: 2px solid #2e74b5;
   background: rgba(46,116,181,.04);
+}
+#e-save.saved {
+  color: #fff; background: #1e8e3e; border-color: #1e8e3e;
+  pointer-events: none;
+  transition: background var(--dur-normal) var(--ease), color var(--dur-normal) var(--ease);
 }
 #btn-edit { color: #2e74b5; border-color: #2e74b5; }
 body.editing #btn-edit { background: #2e74b5; color: #fff; border-color: #2e74b5; }
@@ -317,16 +375,16 @@ body.editing #btn-edit { background: #2e74b5; color: #fff; border-color: #2e74b5
   <div id="recent-menu"></div>
   <button class="tbtn" id="btn-edit" title="切换编辑模式" style="width:auto">编辑</button>
   <button class="tbtn" id="btn-update" title="检查更新" style="width:auto">检查更新</button>
-  <button id="btn-open">打开文档</button>
+  <button id="btn-open"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>打开文档</button>
   <input type="file" id="file-input" accept=".docx" hidden>
 </header>
 <main id="stage">
   <div id="home">
     <div class="hero">
-      <div class="hero-mark">📄</div>
+      <div class="hero-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/></svg></div>
       <div class="hero-title">轻 读</div>
       <div class="hero-sub">秒开的 Word 阅读器 · 全程本地处理 · 无网络依赖</div>
-      <div class="hero-actions"><button class="btn-primary" id="btn-open-hero">打开文档</button></div>
+      <div class="hero-actions"><button class="btn-primary" id="btn-open-hero"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>打开文档</button></div>
       <div class="hero-hint">支持 .docx · 也可以直接把文件拖进窗口</div>
     </div>
     <div class="home-recents">
@@ -336,6 +394,17 @@ body.editing #btn-edit { background: #2e74b5; color: #fff; border-color: #2e74b5
     <div class="home-foot"><span class="ver" id="home-ver"></span> · 文档不出本机</div>
   </div>
   <div id="viewer" hidden></div>
+  <div id="skeleton">
+    <div class="sk-page" style="height:520px">
+      <div class="sk-line w60" style="margin-top:64px"></div>
+      <div class="sk-line"></div><div class="sk-line"></div><div class="sk-line"></div>
+      <div class="sk-line w35"></div><div class="sk-line"></div><div class="sk-line"></div>
+    </div>
+    <div class="sk-page" style="height:420px">
+      <div class="sk-line"></div><div class="sk-line"></div><div class="sk-line w60"></div>
+      <div class="sk-line"></div><div class="sk-line w35"></div>
+    </div>
+  </div>
   <div id="error" hidden title="点击返回首页"></div>
 </main>
 <div id="update-panel"><div class="up-title">更新日志</div><div id="up-log"></div></div>

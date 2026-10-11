@@ -23,6 +23,7 @@ var els = {
   homeVer: document.getElementById('home-ver'),
   btnOpenHero: document.getElementById('btn-open-hero'),
   viewer: document.getElementById('viewer'),
+  skeleton: document.getElementById('skeleton'),
   error: document.getElementById('error'),
   filename: document.getElementById('filename'),
   btnOpen: document.getElementById('btn-open'),
@@ -412,12 +413,16 @@ async function openBytes(bytes, name) {
   clearError();
   hideRecents();
   state.name = name;
+  state.openedAt = Date.now();
   els.filename.textContent = '正在打开 ' + name + ' …';
+  els.home.hidden = true;
+  els.skeleton.classList.add('on');
   try {
     state.buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     parseDocExtras();
     await renderCurrent();
   } catch (e) {
+    els.skeleton.classList.remove('on');
     state.name = null;
     els.filename.textContent = '';
     showError('无法打开「' + name + '」：\n' + (e && e.message ? e.message : '文件解析失败'));
@@ -450,7 +455,15 @@ async function renderCurrent() {
     useBase64URL: true
   });
   document.title = state.name + ' · 轻读';
-  els.filename.textContent = state.name;
+  els.skeleton.classList.remove('on');
+  if (state.openedAt) {
+    els.filename.textContent = state.name + '（打开耗时 ' + ((Date.now() - state.openedAt) / 1000).toFixed(1) + ' 秒）';
+    state.openedAt = 0;
+    clearTimeout(window._qduFnT);
+    window._qduFnT = setTimeout(function () { els.filename.textContent = state.name; }, 2600);
+  } else {
+    els.filename.textContent = state.name;
+  }
   hideHome();
   els.viewer.hidden = false;
   els.viewer.classList.remove('doc-in');
@@ -625,7 +638,15 @@ function rowsCoverBoundary(rows, k) {
 function paginateAll() {
   var wrapper = els.viewer.querySelector('.docx-wrapper');
   if (!wrapper) return;
-  [].slice.call(wrapper.querySelectorAll(':scope > section.docx')).forEach(paginateSection);
+  // rAF 分批：每帧最多处理 6 个节，避免长文档分页时主线程长卡
+  var secs = [].slice.call(wrapper.querySelectorAll(':scope > section.docx'));
+  var i = 0;
+  function batch() {
+    var end = Math.min(i + 6, secs.length);
+    for (; i < end; i++) paginateSection(secs[i]);
+    if (i < secs.length) requestAnimationFrame(batch);
+  }
+  batch();
 }
 
 function paginateSection(section) {
@@ -958,7 +979,55 @@ if (IS_TAURI) {
          失焦时把 DOM 文本差异作为 SetTextCmd 提交引擎；
    撤销/重做/格式命令：引擎改树 → serialize → 全量重绘 + 恢复滚动；
    保存：serialize → Tauri 原位写回（自动 .bak）/ 浏览器版下载副本。 */
-var edit = { on: false, doc: null, stack: null, paras: [], domParas: [], activeIdx: -1, savedDepth: 0 };
+var edit = { on: false, doc: null, stack: null, paras: [], domParas: [], activeIdx: -1, savedDepth: 0, sel: null };
+
+/* 选区捕获：编辑模式下 mouseup/keyup 后，若选区在同一渲染段落内，
+   计算段落内文本偏移 → 存 edit.sel = { paraIdx, start, end }。
+   偏移系 = 渲染 DOM 段落内文本节点拼接序 = w:t 文档序（docx-preview 按文档序渲染，已验证）。 */
+function editCaptureSelection() {
+  edit.sel = null;
+  if (!edit.on) return;
+  var sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+  var range = sel.getRangeAt(0);
+  var startP = range.startContainer.nodeType === 3 ? range.startContainer.parentElement : range.startContainer;
+  var endP = range.endContainer.nodeType === 3 ? range.endContainer.parentElement : range.endContainer;
+  var pEl = startP && startP.closest ? startP.closest('#viewer article > p') : null;
+  if (!pEl || !endP || (endP.closest && endP.closest('#viewer article > p') !== pEl)) return;   // 跨段/出界不管
+  var idx = edit.domParas.indexOf(pEl);
+  if (idx < 0) return;
+  function offsetIn(node, isStart) {
+    var w = document.createTreeWalker(pEl, NodeFilter.SHOW_TEXT);
+    var acc = 0, n;
+    while ((n = w.nextNode())) {
+      if (n === node) return acc + (isStart ? range.startOffset : range.endOffset);
+      acc += n.nodeValue.length;
+    }
+    return acc;
+  }
+  var s = offsetIn(range.startContainer, true);
+  var e = offsetIn(range.endContainer, false);
+  if (e <= s) { var tmp = s; s = e; e = tmp; }
+  if (e > s) edit.sel = { paraIdx: idx, start: s, end: e };
+}
+/* 格式入口：有选区 → 选区命令（run 拆分）；无选区 → 段落首文字块（v0.3 行为） */
+function editApplyFormat(mkRangeCmd, mkParaCmd) {
+  editSyncActive();
+  try {
+    if (edit.sel) {
+      var p = edit.paras[edit.sel.paraIdx];
+      if (!p) return;
+      edit.stack.execute(mkRangeCmd(p, edit.sel.start, edit.sel.end));
+    } else {
+      var p2 = editCmdActivePara(); if (!p2) return;
+      var r = editFirstRun(p2); if (!r) return;
+      edit.stack.execute(mkParaCmd(r));
+    }
+    editAfterCommand();
+  } catch (e2) {
+    showError('格式化失败：' + e2.message);
+  }
+}
 
 function editSyncActive() {
   // 强制同步当前处于编辑态的段落（保存/撤销/格式命令前的幂等兜底：
@@ -983,7 +1052,7 @@ function editRefreshButtons() {
   els.eUndo.disabled = !(edit.stack && edit.stack.canUndo);
   els.eRedo.disabled = !(edit.stack && edit.stack.canRedo);
   edit.dirty = editIsDirty();
-  els.filename.textContent = (edit.dirty ? '● ' : '') + state.name;
+  els.filename.classList.toggle('dirty', edit.dirty);   // ● 由 CSS ::before 呈现（呼吸脉冲）
 }
 function toggleEdit() {
   if (!state.buffer) { showError('请先打开一份文档再进入编辑模式。'); return; }
@@ -1024,6 +1093,7 @@ function exitEdit() {
   els.editBar.classList.remove('on');
   els.editTip.classList.remove('on');
   els.btnEdit.textContent = '编辑';
+  els.filename.classList.remove('dirty');
   els.filename.textContent = state.name;
   edit.doc = null; edit.stack = null; edit.paras = []; edit.domParas = []; edit.savedDepth = 0; edit.activeIdx = -1;
 }
@@ -1057,6 +1127,7 @@ function editSyncPara(i) {
 }
 /* 引擎命令后统一走这里：树已改 → 更新 buffer → 全量重绘（保持滚动） */
 function editAfterCommand() {
+  edit.sel = null;                                     // DOM 重绘，选区偏移失效
   var bytes = QingDuEngine.serialize(edit.doc);
   state.buffer = bytes.buffer;
   var scrollY = els.stage.scrollTop;
@@ -1089,38 +1160,33 @@ function editFirstRun(p) {
   return runs[0] || null;
 }
 els.btnEdit.addEventListener('click', toggleEdit);
+['e-bold', 'e-italic', 'e-fontsize', 'e-color'].forEach(function (id) {
+  document.getElementById(id).addEventListener('mousedown', function (e) {
+    e.preventDefault();                       // 阻止按钮抢焦点 → 选区保留
+  });
+});
+els.viewer.addEventListener('mouseup', function () { setTimeout(editCaptureSelection, 0); });
+els.viewer.addEventListener('keyup', function () { setTimeout(editCaptureSelection, 0); });
 els.eBold.addEventListener('click', function () {
-  editSyncActive();
-  var p = editCmdActivePara(); if (!p) return;
-  var r = editFirstRun(p); if (!r) return;
-  edit.stack.execute(QingDuEngine.SetBoldCmd(r, true));
-  editAfterCommand();
+  editApplyFormat(function (p, a, b) { return QingDuEngine.FormatBoldRangeCmd(p, a, b); },
+                  function (r) { return QingDuEngine.SetBoldCmd(r, true); });
 });
 els.eItalic.addEventListener('click', function () {
-  editSyncActive();
-  var p = editCmdActivePara(); if (!p) return;
-  var r = editFirstRun(p); if (!r) return;
-  edit.stack.execute(QingDuEngine.SetItalicCmd(r, true));
-  editAfterCommand();
+  editApplyFormat(function (p, a, b) { return QingDuEngine.FormatItalicRangeCmd(p, a, b); },
+                  function (r) { return QingDuEngine.SetItalicCmd(r, true); });
 });
 els.eFontsize.addEventListener('change', function () {
   var v = els.eFontsize.value;
   els.eFontsize.value = '';
   if (!v) return;
-  editSyncActive();
-  var p = editCmdActivePara(); if (!p) return;
-  var r = editFirstRun(p); if (!r) return;
-  edit.stack.execute(QingDuEngine.SetFontSizeCmd(r, v));
-  editAfterCommand();
+  editApplyFormat(function (p, a, b) { return QingDuEngine.FormatSizeRangeCmd(p, a, b, v); },
+                  function (r) { return QingDuEngine.SetFontSizeCmd(r, v); });
 });
 els.eColor.addEventListener('change', function () {
   var v = els.eColor.value;
   if (!v || v === '#000000') return;
-  editSyncActive();
-  var p = editCmdActivePara(); if (!p) return;
-  var r = editFirstRun(p); if (!r) return;
-  edit.stack.execute(QingDuEngine.SetColorCmd(r, v));
-  editAfterCommand();
+  editApplyFormat(function (p, a, b) { return QingDuEngine.FormatColorRangeCmd(p, a, b, v); },
+                  function (r) { return QingDuEngine.SetColorCmd(r, v); });
 });
 els.eUndo.addEventListener('click', function () { editSyncActive(); if (edit.stack && edit.stack.undo()) editAfterCommand(); });
 els.eRedo.addEventListener('click', function () { editSyncActive(); if (edit.stack && edit.stack.redo()) editAfterCommand(); });
@@ -1139,7 +1205,11 @@ function editSave() {
     fileIOWriteWithBackup(state.path, bytes).then(function () {
       els.eSave.disabled = false;
       done();
+      els.filename.classList.remove('dirty');
       els.filename.textContent = state.name;
+      els.eSave.textContent = '✓ 已保存';
+      els.eSave.classList.add('saved');
+      setTimeout(function () { els.eSave.textContent = '保存'; els.eSave.classList.remove('saved'); }, 1500);
       upLogSafe('已保存到 ' + state.path + '（原文档已备份为 .bak）');
     }).catch(function (e) {
       els.eSave.disabled = false;

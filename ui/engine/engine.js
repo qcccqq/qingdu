@@ -377,54 +377,145 @@ var QingDuEngine = (function () {
 
   /* 格式命令工厂：对 run 的 rPr 下某个属性元素做"出现/移除"（toggle）
      或"设 w:val"（setval）。首次 do 前快照 rPr 与属性元素的完整状态，undo 精确还原。 */
+  function applyFormatToRun(run, propName, spec) {
+    var rPr = ensureRPr(run);
+    var prop = childByTag(rPr, propName);
+    if (spec.mode === "toggle") {
+      if (spec.value) {
+        if (!prop) { prop = mkEl(run, propName); insertInRPr(rPr, prop); }
+      } else if (prop) {
+        rPr.removeChild(prop);               // 元素缺席 = 关（Word 语义）
+      }
+    } else {                                  // setval：设 w:val，可选剥离 theme* 属性
+      if (!prop) { prop = mkEl(run, propName); insertInRPr(rPr, prop); }
+      prop.setAttribute("w:val", spec.value);
+      if (spec.dropAttrs) {
+        for (var i = 0; i < spec.dropAttrs.length; i++) prop.removeAttribute(spec.dropAttrs[i]);
+      }
+    }
+  }
+  function snapshotFormatOfRun(run, propName) {
+    var rPr0 = childByTag(run, "w:rPr");
+    var p0 = rPr0 ? childByTag(rPr0, propName) : null;
+    return { rPrExisted: !!rPr0, propExisted: !!p0, propAttrs: attrsSnapshot(p0) };
+  }
+  function restoreFormatOfRun(run, snap, propName) {
+    var rPr = childByTag(run, "w:rPr");
+    if (!snap.rPrExisted) {
+      if (rPr && rPr.parentNode) rPr.parentNode.removeChild(rPr);
+      return;
+    }
+    if (!rPr) return;
+    var prop = childByTag(rPr, propName);
+    if (!snap.propExisted) {
+      if (prop) rPr.removeChild(prop);
+      return;
+    }
+    if (!prop) { prop = mkEl(run, propName); insertInRPr(rPr, prop); }
+    attrsRestore(prop, snap.propAttrs);
+  }
+
   function makeFormatCmd(label, run, propName, spec) {
     var snap = null;
     return {
       label: label,
       do: function () {
-        if (!snap) {
-          var rPr0 = childByTag(run, "w:rPr");
-          var p0 = rPr0 ? childByTag(rPr0, propName) : null;
-          snap = {
-            rPrExisted: !!rPr0,
-            propExisted: !!p0,
-            propAttrs: attrsSnapshot(p0)
-          };
-        }
-        var rPr = ensureRPr(run);
-        var prop = childByTag(rPr, propName);
-        if (spec.mode === "toggle") {
-          if (spec.value) {
-            if (!prop) { prop = mkEl(run, propName); insertInRPr(rPr, prop); }
-          } else if (prop) {
-            rPr.removeChild(prop);           // 元素缺席 = 关（Word 语义）
-          }
-        } else {                              // setval：设 w:val，可选剥离 theme* 属性
-          if (!prop) { prop = mkEl(run, propName); insertInRPr(rPr, prop); }
-          prop.setAttribute("w:val", spec.value);
-          if (spec.dropAttrs) {
-            for (var i = 0; i < spec.dropAttrs.length; i++) prop.removeAttribute(spec.dropAttrs[i]);
-          }
-        }
+        if (!snap) snap = snapshotFormatOfRun(run, propName);
+        applyFormatToRun(run, propName, spec);
       },
       undo: function () {
         if (!snap) return;
-        var rPr = childByTag(run, "w:rPr");
-        if (!snap.rPrExisted) {
-          // rPr 是本命令建出来的：连锅端掉
-          if (rPr && rPr.parentNode) rPr.parentNode.removeChild(rPr);
-          return;
-        }
-        if (!rPr) return;                    // 防御：结构被外部改动
-        var prop = childByTag(rPr, propName);
-        if (!snap.propExisted) {
-          if (prop) rPr.removeChild(prop);
-          return;
-        }
-        if (!prop) { prop = mkEl(run, propName); insertInRPr(rPr, prop); }
-        attrsRestore(prop, snap.propAttrs);
+        restoreFormatOfRun(run, snap, propName);
       }
     };
+  }
+
+  /* 选区格式化：把段落文本 [startOff, endOff) 范围应用格式（Word 的 run 拆分语义）。
+     do：边界落在 w:t 内部时拆 run（克隆 run 保 rPr，左右各半文本），
+          完全落在范围内的 run 逐个应用格式。
+     undo：拆分的 run 并回原 run（文本还原+移除克隆），格式逐个按快照恢复。
+     段落节点本身不被替换 —— edit.paras 引用保持稳定。 */
+  function FormatRangeCmd(p, startOff, endOff, label, propName, spec) {
+    var splits = null;      // [{ run, cloneRun, t, cloneT, fullText }]
+    var fmtSnaps = null;    // [{ run, snap }]
+    function collect() {    // 段落内 (t, run, 全局起始偏移) 序列
+      var out = [], acc = 0;
+      var ts = toArray(p.getElementsByTagName("w:t"));
+      for (var i = 0; i < ts.length; i++) {
+        out.push({ t: ts[i], run: ts[i].parentNode, start: acc, len: ts[i].textContent.length });
+        acc += ts[i].textContent.length;
+      }
+      return out;
+    }
+    function splitAt(items, globalOff) {
+      // 返回新 items（拆分后重算）；globalOff 必须落在某个 t 内部（0 < local < len）
+      for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        var local = globalOff - it.start;
+        if (it.t === null || local <= 0 || local >= it.len) continue;
+        var run = it.run;
+        var cloneRun = run.cloneNode(true);
+        run.parentNode.insertBefore(cloneRun, run.nextSibling);
+        var cloneT = cloneRun.getElementsByTagName("w:t")[0];
+        var full = it.t.textContent;
+        it.t.textContent = full.slice(0, local);
+        cloneT.textContent = full.slice(local);
+        splits.push({ run: run, cloneRun: cloneRun, t: it.t, cloneT: cloneT, fullText: full });
+        return collect();   // 结构变了，重算
+      }
+      return items;
+    }
+    return {
+      label: label,
+      do: function () {
+        if (!splits) splits = [];
+        if (!fmtSnaps) fmtSnaps = [];
+        if (endOff <= startOff) throw new Error("选区为空，拒绝格式化");
+        var items = collect();
+        items = splitAt(items, startOff);
+        items = splitAt(items, endOff);
+        // 收集完全落在 [startOff, endOff) 内的 run（去重：一个 run 多个 w:t 只格式化一次）
+        var seen = {}, targets = [];
+        for (var i = 0; i < items.length; i++) {
+          var it = items[i];
+          if (it.start >= startOff && it.start + it.len <= endOff && !seen[it.run]) {
+            seen[it.run] = 1;
+            targets.push(it.run);
+          }
+        }
+        if (!targets.length) throw new Error("选区未命中任何文字 run");
+        for (var j = 0; j < targets.length; j++) {
+          fmtSnaps.push({ run: targets[j], snap: snapshotFormatOfRun(targets[j], propName) });
+          applyFormatToRun(targets[j], propName, spec);
+        }
+      },
+      undo: function () {
+        if (!splits) return;
+        for (var i = 0; i < fmtSnaps.length; i++) {
+          restoreFormatOfRun(fmtSnaps[i].run, fmtSnaps[i].snap, propName);
+        }
+        for (var j = splits.length - 1; j >= 0; j--) {   // 逆序并回
+          var s = splits[j];
+          s.t.textContent = s.fullText;
+          if (s.cloneRun.parentNode) s.cloneRun.parentNode.removeChild(s.cloneRun);
+        }
+      }
+    };
+  }
+  function FormatBoldRangeCmd(p, startOff, endOff) {
+    return FormatRangeCmd(p, startOff, endOff, "选区加粗", "w:b", { mode: "toggle", value: true });
+  }
+  function FormatItalicRangeCmd(p, startOff, endOff) {
+    return FormatRangeCmd(p, startOff, endOff, "选区倾斜", "w:i", { mode: "toggle", value: true });
+  }
+  function FormatSizeRangeCmd(p, startOff, endOff, halfPoints) {
+    return FormatRangeCmd(p, startOff, endOff, "选区字号", "w:sz", { mode: "setval", value: String(halfPoints) });
+  }
+  function FormatColorRangeCmd(p, startOff, endOff, hex) {
+    return FormatRangeCmd(p, startOff, endOff, "选区颜色", "w:color", {
+      mode: "setval", value: String(hex).replace(/^#/, ""),
+      dropAttrs: ["w:themeColor", "w:themeShade", "w:themeTint"]
+    });
   }
 
   /* 加粗：w:b 元素出现 = 开，缺席 = 关 */
@@ -569,7 +660,12 @@ var QingDuEngine = (function () {
     SetFontSizeCmd: SetFontSizeCmd,
     SetColorCmd: SetColorCmd,
     SplitParagraphCmd: SplitParagraphCmd,
-    DeleteCharCmd: DeleteCharCmd
+    DeleteCharCmd: DeleteCharCmd,
+    FormatRangeCmd: FormatRangeCmd,
+    FormatBoldRangeCmd: FormatBoldRangeCmd,
+    FormatItalicRangeCmd: FormatItalicRangeCmd,
+    FormatSizeRangeCmd: FormatSizeRangeCmd,
+    FormatColorRangeCmd: FormatColorRangeCmd
   };
 })();
 
