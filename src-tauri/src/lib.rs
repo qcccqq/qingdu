@@ -87,7 +87,7 @@ fn check_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
 #[tauri::command(async)]
 fn perform_update(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::Emitter;
-    let emit = |stage: &str, detail: String| -> () {
+    let emit = |stage: &str, detail: &str| -> () {
         let _ = app.emit("update-log", format!("{}|{}", stage, detail));
     };
     let dl = |name: &str, app: &tauri::AppHandle| -> Result<Vec<u8>, String> {
@@ -102,7 +102,7 @@ fn perform_update(app: tauri::AppHandle) -> Result<(), String> {
                 let mut buf: Vec<u8> = Vec::new();
                 let mut chunk = [0u8; 65536];
                 let mut last_emit = 0usize;
-                emit("download", format!("开始下载 {}", name));
+                emit("download", &format!("开始下载 {}", name));
                 loop {
                     let n = reader
                         .read(&mut chunk)
@@ -112,12 +112,12 @@ fn perform_update(app: tauri::AppHandle) -> Result<(), String> {
                     if buf.len() - last_emit >= 512 * 1024 {
                         last_emit = buf.len();
                         match total {
-                            Some(t) => emit("download", format!("进度 {}/{} KB", buf.len() / 1024, t / 1024)),
-                            None => emit("download", format!("已下载 {} KB", buf.len() / 1024)),
+                            Some(t) => emit("download", &format!("进度 {}/{} KB", buf.len() / 1024, t / 1024)),
+                            None => emit("download", &format!("已下载 {} KB", buf.len() / 1024)),
                         }
                     }
                 }
-                emit("download", format!("{} 下载完成（{} KB）", name, buf.len() / 1024));
+                emit("download", &format!("{} 下载完成（{} KB）", name, buf.len() / 1024));
                 Ok(buf)
             }
             Err(ureq::Error::Status(404, _)) => Err("更新通道尚未就绪（云端还没有已发布的版本）".into()),
@@ -134,7 +134,7 @@ fn perform_update(app: tauri::AppHandle) -> Result<(), String> {
     if expect.len() != 64 {
         return Err("更新清单缺少校验值，已取消更新".into());
     }
-    emit("step", format!("远端版本 {}，开始下载安装包", v["version"].as_str().unwrap_or("?")));
+    emit("step", &format!("远端版本 {}，开始下载安装包", v["version"].as_str().unwrap_or("?")));
     let exe = dl("qingdu-Setup.exe", &app)?;
     let actual = sha256_hex(&exe);
     emit("step", "校验安装包完整性（SHA-256）…");
