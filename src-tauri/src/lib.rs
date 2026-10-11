@@ -55,12 +55,19 @@ struct UpdateInfo {
 #[tauri::command]
 fn check_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
     let current = app.package_info().version.to_string();
-    let body = ureq::get(&format!("{}/version.json", UPDATE_BASE))
-        .timeout(std::time::Duration::from_secs(30))
-        .call()
-        .map_err(|e| format!("无法连接更新服务器: {}", e))?
-        .into_string()
-        .map_err(|e| e.to_string())?;
+    let resp = ureq::get(&format!("{}/version.json", UPDATE_BASE))
+        .timeout(std::time::Duration::from_secs(20))
+        .call();
+    let body = match resp {
+        Ok(r) => r.into_string().map_err(|e| e.to_string())?,
+        Err(ureq::Error::Status(404, _)) => {
+            return Err("更新通道尚未就绪（云端还没有已发布的版本），请稍后再试".into())
+        }
+        Err(ureq::Error::Status(code, _)) => {
+            return Err(format!("更新服务器返回错误（{}）", code))
+        }
+        Err(e) => return Err(format!("无法连接更新服务器: {}", e)),
+    };
     // 容错：剥掉可能存在的 UTF-8 BOM（serde_json 不接受 BOM）
     let body = body.trim_start_matches('\u{feff}');
     let v: serde_json::Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
@@ -80,12 +87,19 @@ fn perform_update() -> Result<(), String> {
     let dl = |name: &str| -> Result<Vec<u8>, String> {
         let resp = ureq::get(&format!("{}/{}", UPDATE_BASE, name))
             .timeout(std::time::Duration::from_secs(600))
-            .call()
-            .map_err(|e| format!("下载 {} 失败: {}", name, e))?;
-        let mut reader = resp.into_reader();
-        let mut buf = Vec::new();
-        std::io::copy(&mut reader, &mut buf).map_err(|e| format!("读取 {} 失败: {}", name, e))?;
-        Ok(buf)
+            .call();
+        match resp {
+            Ok(r) => {
+                let mut reader = r.into_reader();
+                let mut buf = Vec::new();
+                std::io::copy(&mut reader, &mut buf)
+                    .map_err(|e| format!("读取 {} 失败: {}", name, e))?;
+                Ok(buf)
+            }
+            Err(ureq::Error::Status(404, _)) => Err("更新通道尚未就绪（云端还没有已发布的版本）".into()),
+            Err(ureq::Error::Status(code, _)) => Err(format!("更新服务器返回错误（{}）", code)),
+            Err(e) => Err(format!("下载 {} 失败: {}", name, e)),
+        }
     };
     let manifest = dl("version.json")?;
     let manifest = String::from_utf8_lossy(&manifest);
