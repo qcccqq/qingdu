@@ -212,7 +212,6 @@ function openByPath(path) {
 function showHome() {
   els.home.hidden = false;
   els.viewer.hidden = true;
-  els.error.hidden = true;
   setGroups(false);
   fillHomeVersion();
   renderHomeRecents();
@@ -263,11 +262,15 @@ function renderHomeRecents() {
 
 function showError(msg) {
   els.error.textContent = msg;
-  els.error.hidden = false;
-  showHome();
+  els.home.hidden = true;      // 错误态：盖掉首页，错误卡片独占舞台
+  els.viewer.hidden = true;
   els.error.hidden = false;
   setGroups(false);
 }
+els.error.addEventListener('click', function () {
+  els.error.hidden = true;
+  showHome();
+});
 function clearError() { els.error.hidden = true; }
 function setGroups(on) {
   [els.searchBox, els.pageBox, els.zoomBox].forEach(function (g) { g.classList.toggle('on', on); });

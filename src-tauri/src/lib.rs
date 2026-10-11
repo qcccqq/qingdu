@@ -86,6 +86,7 @@ fn check_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
 /// 【async】下载耗时长，同样必须后台执行；进度通过事件实时推给前端。
 #[tauri::command(async)]
 fn perform_update(app: tauri::AppHandle) -> Result<(), String> {
+    use std::io::Read as _;
     use tauri::Emitter;
     let emit = |stage: &str, detail: &str| -> () {
         let _ = app.emit("update-log", format!("{}|{}", stage, detail));
