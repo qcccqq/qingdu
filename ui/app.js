@@ -330,6 +330,7 @@ async function openBytes(bytes, name) {
   els.filename.textContent = '正在打开 ' + name + ' …';
   try {
     state.buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    parseDocExtras();
     await renderCurrent();
   } catch (e) {
     state.name = null;
@@ -375,6 +376,88 @@ async function renderCurrent() {
   });
 }
 
+/* ============ 文档附加信息解析：页码字段 + 表格标题行 ============ */
+function parseDocExtras() {
+  state.fieldInfo = { header: [], footer: [] };
+  state.tableHeaderRows = {};
+  try {
+    var zip = fflate.unzipSync(new Uint8Array(state.buffer));
+    var dec = new TextDecoder();
+    // 1) 页眉/页脚里的 PAGE / NUMPAGES 字段（按出现顺序，含缓存值）
+    ['header', 'footer'].forEach(function (part) {
+      Object.keys(zip).forEach(function (key) {
+        if (key.indexOf('word/' + part) !== 0 || !/\.xml$/.test(key)) return;
+        var doc = new DOMParser().parseFromString(dec.decode(zip[key]), 'application/xml');
+        var fields = [];
+        var type = null, collecting = false, buf = [];
+        [].forEach.call(doc.getElementsByTagName('*'), function (el) {
+          var tag = el.tagName;
+          if (tag === 'w:instrText') {
+            var t = el.textContent || '';
+            if (t.indexOf('PAGE') >= 0 && t.indexOf('NUMPAGES') < 0) type = 'PAGE';
+            else if (t.indexOf('NUMPAGES') >= 0) type = 'NUMPAGES';
+          } else if (tag === 'w:fldChar') {
+            var ft = el.getAttribute('w:fldCharType');
+            if (ft === 'separate' && type) collecting = true;
+            if (ft === 'end') {
+              if (type) fields.push({ type: type, cached: buf.join('') });
+              type = null; collecting = false; buf = [];
+            }
+          } else if (collecting && tag === 'w:t') {
+            buf.push(el.textContent || '');
+          }
+        });
+        state.fieldInfo[part] = state.fieldInfo[part].concat(fields);
+      });
+    });
+    // 2) 每个顶层表格的“标题行”数量（w:tblHeader，Word 跨页重复表头）
+    var doc = new DOMParser().parseFromString(dec.decode(zip['word/document.xml']), 'application/xml');
+    var body = doc.getElementsByTagName('w:body')[0];
+    var tblOrd = -1;
+    [].forEach.call(body.children, function (child) {
+      if (child.tagName === 'w:tbl') {
+        tblOrd++;
+        var hdr = 0;
+        [].forEach.call(child.getElementsByTagName('w:tr'), function (tr) {
+          if (hdr === 0 || tr.getElementsByTagName('w:tblHeader').length) {
+            if (tr.getElementsByTagName('w:tblHeader').length) hdr++;
+            else if (hdr === 0 && tr.getElementsByTagName('w:tblHeader').length === 0 && hdr === 0 && tr === child.getElementsByTagName('w:tr')[0] && tr.getElementsByTagName('w:tblHeader').length) hdr++;
+          }
+        });
+        // 简化：统计表内带 tblHeader 的行数（Word 规定它们位于表头）
+        hdr = [].filter.call(child.getElementsByTagName('w:tr'), function (tr) {
+          return tr.getElementsByTagName('w:tblHeader').length > 0;
+        }).length;
+        if (hdr) state.tableHeaderRows[tblOrd] = hdr;
+      }
+    });
+  } catch (e) { /* 解析失败不影响阅读 */ }
+}
+
+/* ============ 页码字段实算：连续视图下用真实页序替换 Word 缓存值 ============ */
+function fixPageFields() {
+  if (!state.fieldInfo) return;
+  var secs = Array.prototype.slice.call(els.viewer.querySelectorAll('section.docx'));
+  var N = secs.length;
+  secs.forEach(function (sec, i) {
+    ['header', 'footer'].forEach(function (part) {
+      var fields = state.fieldInfo[part] || [];
+      if (!fields.length) return;
+      sec.querySelectorAll(':scope > ' + part).forEach(function (pf) {
+        var walker = document.createTreeWalker(pf, NodeFilter.SHOW_TEXT, null);
+        var tn, fi = 0;
+        while ((tn = walker.nextNode()) && fi < fields.length) {
+          var f = fields[fi];
+          if (f.cached && tn.nodeValue && tn.nodeValue.trim() === f.cached.trim()) {
+            tn.nodeValue = (f.type === 'PAGE') ? String(i + 1) : String(N);
+            fi++;
+          }
+        }
+      });
+    });
+  });
+}
+
 /* ============ 渲染后增强：等图片全部就绪后执行（水印/分页/浮动图/适宽） ============ */
 function enhanceWhenReady() {
   return new Promise(function (resolve) {
@@ -401,8 +484,10 @@ function enhanceWhenReady() {
 
 function enhanceNow() {
   fixHeaderWatermarks();
+  fixVmlTextboxes();
   paginateAll();
   renderFloatingAnchors();
+  fixPageFields();
   autoFitIfNeeded();
 }
 
@@ -488,6 +573,10 @@ function paginateSection(section) {
       var contTable = cutEl.cloneNode(false);             // 表格属性与样式
       var cg = cutEl.querySelector('colgroup');
       if (cg) contTable.appendChild(cg.cloneNode(true));
+      // 续页顶部重复“标题行”（Word 的 tblHeader 语义）
+      var tblOrd = kids.slice(0, cutIdx + 1).filter(function (k) { return k.tagName === 'TABLE'; }).length - 1;
+      var hdrCount = Math.min((state.tableHeaderRows || {})[tblOrd] || 0, cutRow);
+      rowsAll.slice(0, hdrCount).forEach(function (hr) { contTable.appendChild(hr.cloneNode(true)); });
       var thead = cutEl.querySelector('thead');
       if (thead) contTable.appendChild(thead.cloneNode(true));
       rowsAll.slice(cutRow).forEach(function (r3) { contTable.appendChild(r3); });
