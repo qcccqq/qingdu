@@ -1042,7 +1042,8 @@ function editIsDirty() {
 }
 
 function editDomParas() {
-  return Array.prototype.slice.call(els.viewer.querySelectorAll('article > p'));
+  // 文档序拼接：正文段落 + 表格内段落（与 QingDuEngine.allParagraphs 的遍历序一致）
+  return Array.prototype.slice.call(els.viewer.querySelectorAll('article > p, article table p'));
 }
 function editCheckAlignment() {
   edit.domParas = editDomParas();
@@ -1060,7 +1061,7 @@ function toggleEdit() {
   try {
     edit.doc = QingDuEngine.load(new Uint8Array(state.buffer));
   } catch (e) { showError('这份文档暂不支持编辑（解析失败）：\n' + e.message); return; }
-  edit.paras = QingDuEngine.paragraphs(edit.doc);
+  edit.paras = QingDuEngine.allParagraphs(edit.doc);
   if (!editCheckAlignment()) {
     showError('文档结构特殊（段落对齐失败），已阻止编辑以保护文件。\n阅读功能不受影响。');
     edit.doc = null; return;

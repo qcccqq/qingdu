@@ -297,11 +297,27 @@ var QingDuEngine = (function () {
 
   /* ==================== DOM 适配层：段落读取 ==================== */
 
-  /* body 直接子元素中的顶层 w:p（表格内段落不索引 —— v1 限制） */
+  /* body 直接子元素中的顶层 w:p（表格内段落不索引 —— 兼容旧语义，测试依赖） */
   function paragraphs(doc) {
     var out = [], kids = doc.body.children;
     for (var i = 0; i < kids.length; i++) {
       if (kids[i].tagName === "w:p") out.push(kids[i]);
+    }
+    return out;
+  }
+
+  /* 全部可编辑段落：顶层 w:p + 表格内 w:p（含嵌套表），严格文档序。
+     与渲染层 "#viewer article > p, #viewer table p" 的 DOM 文档序一一对应。 */
+  function allParagraphs(doc) {
+    var out = [], kids = doc.body.children;
+    for (var i = 0; i < kids.length; i++) {
+      var k = kids[i];
+      if (k.tagName === "w:p") {
+        out.push(k);
+      } else if (k.tagName === "w:tbl") {
+        var ps = toArray(k.getElementsByTagName("w:p"));
+        for (var j = 0; j < ps.length; j++) out.push(ps[j]);
+      }
     }
     return out;
   }
@@ -647,6 +663,7 @@ var QingDuEngine = (function () {
     load: load,
     serialize: serialize,
     paragraphs: paragraphs,
+    allParagraphs: allParagraphs,
     getParaText: getParaText,
     setText: setText,
     runs: runs,
