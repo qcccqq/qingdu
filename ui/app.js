@@ -45,7 +45,17 @@ var els = {
   recentMenu: document.getElementById('recent-menu'),
   btnUpdate: document.getElementById('btn-update'),
   updatePanel: document.getElementById('update-panel'),
-  upLog: document.getElementById('up-log')
+  upLog: document.getElementById('up-log'),
+  btnEdit: document.getElementById('btn-edit'),
+  editBar: document.getElementById('edit-bar'),
+  editTip: document.getElementById('edit-tip'),
+  eBold: document.getElementById('e-bold'),
+  eItalic: document.getElementById('e-italic'),
+  eFontsize: document.getElementById('e-fontsize'),
+  eColor: document.getElementById('e-color'),
+  eUndo: document.getElementById('e-undo'),
+  eRedo: document.getElementById('e-redo'),
+  eSave: document.getElementById('e-save')
 };
 
 var state = { name: null, buffer: null, path: null };
@@ -941,6 +951,244 @@ if (IS_TAURI) {
     if (e.payload) openByPath(e.payload);
   });
 }
+
+/* ================= 编辑模式（v0.3.1：引擎接线） =================
+   架构：XML 树（QingDuEngine）= 唯一事实源；渲染 DOM 只是投影。
+   输入：双击段落进入原生编辑（中文输入法体验完好），
+         失焦时把 DOM 文本差异作为 SetTextCmd 提交引擎；
+   撤销/重做/格式命令：引擎改树 → serialize → 全量重绘 + 恢复滚动；
+   保存：serialize → Tauri 原位写回（自动 .bak）/ 浏览器版下载副本。 */
+var edit = { on: false, doc: null, stack: null, paras: [], domParas: [], activeIdx: -1, savedDepth: 0 };
+
+function editSyncActive() {
+  // 强制同步当前处于编辑态的段落（保存/撤销/格式命令前的幂等兜底：
+  // 正常路径由 focusout 触发；此处兜底焦点机制失效的极端环境）
+  var p = edit.domParas && edit.activeIdx >= 0 ? edit.domParas[edit.activeIdx] : null;
+  if (p && p.getAttribute('contenteditable') === 'true') {
+    editSyncPara(edit.activeIdx);
+  }
+}
+function editIsDirty() {
+  return !!(edit.stack && edit.stack.size() !== edit.savedDepth);
+}
+
+function editDomParas() {
+  return Array.prototype.slice.call(els.viewer.querySelectorAll('article > p'));
+}
+function editCheckAlignment() {
+  edit.domParas = editDomParas();
+  return edit.paras.length === edit.domParas.length;
+}
+function editRefreshButtons() {
+  els.eUndo.disabled = !(edit.stack && edit.stack.canUndo);
+  els.eRedo.disabled = !(edit.stack && edit.stack.canRedo);
+  edit.dirty = editIsDirty();
+  els.filename.textContent = (edit.dirty ? '● ' : '') + state.name;
+}
+function toggleEdit() {
+  if (!state.buffer) { showError('请先打开一份文档再进入编辑模式。'); return; }
+  if (edit.on) { exitEdit(); return; }
+  try {
+    edit.doc = QingDuEngine.load(new Uint8Array(state.buffer));
+  } catch (e) { showError('这份文档暂不支持编辑（解析失败）：\n' + e.message); return; }
+  edit.paras = QingDuEngine.paragraphs(edit.doc);
+  if (!editCheckAlignment()) {
+    showError('文档结构特殊（段落对齐失败），已阻止编辑以保护文件。\n阅读功能不受影响。');
+    edit.doc = null; return;
+  }
+  edit.stack = QingDuEngine.createCommandStack(edit.doc);
+  edit.on = true; edit.savedDepth = 0; edit.activeIdx = -1;
+  document.body.classList.add('editing');
+  els.editBar.classList.add('on');
+  els.editTip.classList.add('on');
+  els.btnEdit.textContent = '退出编辑';
+  edit.domParas.forEach(function (p, i) {
+    p.setAttribute('contenteditable', 'false');
+    p.addEventListener('dblclick', function () { editFocusPara(i); });
+  });
+  // focusout 冒泡（blur 不冒泡）：段落失焦即同步引擎，事件委托更可靠
+  els.viewer.addEventListener('focusout', function (e) {
+    var p = e.target;
+    if (p && p.tagName === 'P' && p.getAttribute('contenteditable') === 'true') {
+      var idx = edit.domParas.indexOf(p);
+      if (idx >= 0) editSyncPara(idx);
+    }
+  });
+  editRefreshButtons();
+}
+function exitEdit() {
+  editSyncActive();
+  if (edit.on && editIsDirty() && !window.confirm('有未保存的修改，确定退出编辑模式吗？\n（确定后将丢失未保存的改动）')) return;
+  edit.on = false;
+  document.body.classList.remove('editing');
+  els.editBar.classList.remove('on');
+  els.editTip.classList.remove('on');
+  els.btnEdit.textContent = '编辑';
+  els.filename.textContent = state.name;
+  edit.doc = null; edit.stack = null; edit.paras = []; edit.domParas = []; edit.savedDepth = 0; edit.activeIdx = -1;
+}
+function editFocusPara(i) {
+  edit.activeIdx = i;
+  var p = edit.domParas[i];
+  p.setAttribute('contenteditable', 'true');
+  p.focus();
+  // 光标移到末尾
+  var sel = window.getSelection();
+  var range = document.createRange();
+  range.selectNodeContents(p);
+  range.collapse(false);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+function editSyncPara(i) {
+  var p = edit.domParas[i];
+  p.setAttribute('contenteditable', 'false');
+  var domText = (p.textContent || '');
+  var treeText = QingDuEngine.getParaText(edit.paras[i]);
+  if (domText !== treeText) {
+    try {
+      edit.stack.execute(QingDuEngine.SetTextCmd(edit.paras[i], treeText, domText));
+      editRefreshButtons();
+    } catch (e) {
+      // 指纹不符（罕见）：以引擎树为准还原 DOM
+      p.textContent = treeText;
+    }
+  }
+}
+/* 引擎命令后统一走这里：树已改 → 更新 buffer → 全量重绘（保持滚动） */
+function editAfterCommand() {
+  var bytes = QingDuEngine.serialize(edit.doc);
+  state.buffer = bytes.buffer;
+  var scrollY = els.stage.scrollTop;
+  renderCurrent().then(function () {
+    els.stage.scrollTop = scrollY;
+    if (edit.on) {
+      // 重绘后 DOM 段落引用全部失效：重建索引与事件（focusout 委托在 viewer 上，无需重挂）
+      if (!editCheckAlignment()) { exitEdit(); return; }
+      edit.domParas.forEach(function (p, i) {
+        p.setAttribute('contenteditable', 'false');
+        p.addEventListener('dblclick', function () { editFocusPara(i); });
+      });
+    }
+    editRefreshButtons();
+  });
+}
+function editCmdActivePara() {
+  if (edit.activeIdx < 0 || !edit.paras[edit.activeIdx]) {
+    showError('请先双击一个段落进入编辑，再使用格式按钮。');
+    return null;
+  }
+  return edit.paras[edit.activeIdx];
+}
+function editFirstRun(p) {
+  var runs = QingDuEngine.runs(p);
+  for (var i = 0; i < runs.length; i++) {
+    var ts = runs[i].getElementsByTagName('w:t');
+    if (ts.length && (ts[0].textContent || '').length) return runs[i];
+  }
+  return runs[0] || null;
+}
+els.btnEdit.addEventListener('click', toggleEdit);
+els.eBold.addEventListener('click', function () {
+  editSyncActive();
+  var p = editCmdActivePara(); if (!p) return;
+  var r = editFirstRun(p); if (!r) return;
+  edit.stack.execute(QingDuEngine.SetBoldCmd(r, true));
+  editAfterCommand();
+});
+els.eItalic.addEventListener('click', function () {
+  editSyncActive();
+  var p = editCmdActivePara(); if (!p) return;
+  var r = editFirstRun(p); if (!r) return;
+  edit.stack.execute(QingDuEngine.SetItalicCmd(r, true));
+  editAfterCommand();
+});
+els.eFontsize.addEventListener('change', function () {
+  var v = els.eFontsize.value;
+  els.eFontsize.value = '';
+  if (!v) return;
+  editSyncActive();
+  var p = editCmdActivePara(); if (!p) return;
+  var r = editFirstRun(p); if (!r) return;
+  edit.stack.execute(QingDuEngine.SetFontSizeCmd(r, v));
+  editAfterCommand();
+});
+els.eColor.addEventListener('change', function () {
+  var v = els.eColor.value;
+  if (!v || v === '#000000') return;
+  editSyncActive();
+  var p = editCmdActivePara(); if (!p) return;
+  var r = editFirstRun(p); if (!r) return;
+  edit.stack.execute(QingDuEngine.SetColorCmd(r, v));
+  editAfterCommand();
+});
+els.eUndo.addEventListener('click', function () { editSyncActive(); if (edit.stack && edit.stack.undo()) editAfterCommand(); });
+els.eRedo.addEventListener('click', function () { editSyncActive(); if (edit.stack && edit.stack.redo()) editAfterCommand(); });
+
+function editSave() {
+  if (!edit.on) return;
+  editSyncActive();                                    // 兜底：确保活动段已入引擎
+  if (!editIsDirty()) { showError('没有需要保存的修改。'); return; }
+  var bytes = new Uint8Array(QingDuEngine.serialize(edit.doc));
+  var done = function () {
+    edit.savedDepth = edit.stack.size();
+    editRefreshButtons();
+  };
+  if (IS_TAURI && state.path) {
+    els.eSave.disabled = true;
+    fileIOWriteWithBackup(state.path, bytes).then(function () {
+      els.eSave.disabled = false;
+      done();
+      els.filename.textContent = state.name;
+      upLogSafe('已保存到 ' + state.path + '（原文档已备份为 .bak）');
+    }).catch(function (e) {
+      els.eSave.disabled = false;
+      showError('保存失败：' + e);
+    });
+  } else {
+    // 浏览器版 / 无路径：下载编辑副本（不动原文件）
+    var blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = state.name.replace(/\.docx$/i, '') + '-已编辑.docx';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    done();
+  }
+}
+els.eSave.addEventListener('click', editSave);
+function upLogSafe(msg) {
+  if (typeof upLog === 'function') upLog(msg, 'ok');
+  else console.log(msg);
+}
+
+/* 编辑快捷键（并入全局 keydown 链） */
+window.addEventListener('keydown', function (e) {
+  if (!edit.on) return;
+  if (e.ctrlKey && e.key.toLowerCase() === 's') { e.preventDefault(); editSave(); }
+  else if (e.ctrlKey && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+    editSyncActive();
+    e.preventDefault();
+    var ae = document.activeElement;
+    if (!(ae && ae.getAttribute('contenteditable') === 'true') && edit.stack && edit.stack.undo()) editAfterCommand();
+  }
+  else if ((e.ctrlKey && e.key.toLowerCase() === 'y') || (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'z')) {
+    e.preventDefault();
+    editSyncActive();
+    var ae2 = document.activeElement;
+    if (!(ae2 && ae2.getAttribute('contenteditable') === 'true') && edit.stack && edit.stack.redo()) editAfterCommand();
+  }
+});
+
+/* 打开新文档 / 回首页时：退出编辑模式并清空引擎状态 */
+(function () {
+  var origOpenBytes = openBytes;
+  openBytes = function (bytes, name) {
+    if (edit.on) { edit.on = false; document.body.classList.remove('editing'); els.editBar.classList.remove('on'); els.editTip.classList.remove('on'); els.btnEdit.textContent = '编辑'; }
+    edit.doc = null; edit.stack = null; edit.paras = []; edit.domParas = []; edit.savedDepth = 0; edit.activeIdx = -1;
+    return origOpenBytes(bytes, name);
+  };
+})();
 
 /* ================= 启动：渲染首页 ================= */
 showHome();

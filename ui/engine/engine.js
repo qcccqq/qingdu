@@ -138,6 +138,7 @@ var QingDuEngine = (function () {
         stack.canUndo = true;
         stack.canRedo = false;
       },
+      size: function () { return undoList.length; },   // 已执行未撤销的命令数（保存点比对用）
       undo: function () {
         if (!undoList.length) return false;
         var cmd = undoList.pop();

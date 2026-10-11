@@ -222,6 +222,48 @@ mark.qdu-hit.qdu-cur { background: #ff8c69; }
   white-space: pre-wrap;
 }
 #error[hidden] { display: none; }
+#error { cursor: pointer; }
+
+/* ============ 编辑模式 ============ */
+#edit-bar {
+  display: none;
+  align-items: center;
+  gap: 6px;
+}
+#edit-bar.on { display: flex; }
+#edit-tip {
+  position: fixed; top: var(--topbar-h); left: 0; right: 0;
+  background: #2e74b5; color: #fff;
+  font-size: 12px; text-align: center; padding: 4px 0;
+  z-index: 40; display: none;
+}
+#edit-tip.on { display: block; }
+body.editing #viewer p[contenteditable] {
+  outline: 1px dashed rgba(46,116,181,.55);
+  outline-offset: 2px;
+  cursor: text;
+}
+body.editing #viewer p[contenteditable]:hover {
+  outline: 1px solid rgba(46,116,181,.8);
+  background: rgba(46,116,181,.05);
+}
+body.editing #viewer p[contenteditable]:focus {
+  outline: 2px solid #2e74b5;
+  background: rgba(46,116,181,.04);
+}
+#btn-edit { color: #2e74b5; border-color: #2e74b5; }
+body.editing #btn-edit { background: #2e74b5; color: #fff; border-color: #2e74b5; }
+.ebtn {
+  min-width: 26px; height: 26px; padding: 0 7px;
+  border: 1px solid #d0d0d0; border-radius: 6px;
+  background: #fff; cursor: pointer; font-size: 12px; color: #333;
+}
+.ebtn:hover:not(:disabled) { background: #f2f6fb; border-color: #2e74b5; }
+.ebtn:disabled { color: #bbb; cursor: default; }
+.ebtn.bold { font-weight: 800; }
+.ebtn.italic { font-style: italic; }
+#e-fontsize { height: 26px; border: 1px solid #d0d0d0; border-radius: 6px; font-size: 12px; padding: 0 4px; }
+#e-color { width: 26px; height: 26px; padding: 0; border: 1px solid #d0d0d0; border-radius: 6px; background: #fff; cursor: pointer; }
 #update-panel {
   position: fixed; right: 14px; top: 60px; width: 330px;
   background: #1f2430; color: #d8e0ea; border-radius: 10px;
@@ -257,8 +299,23 @@ mark.qdu-hit.qdu-cur { background: #ff8c69; }
     <button class="tbtn" id="zoom-in" title="放大 (Ctrl++)">＋</button>
     <button class="tbtn" id="zoom-fit" title="适应宽度" style="width:auto">适宽</button>
   </div>
+  <div id="edit-bar">
+    <button class="ebtn bold" id="e-bold" title="加粗（作用于本段首个文字块）">B</button>
+    <button class="ebtn italic" id="e-italic" title="倾斜">I</button>
+    <select id="e-fontsize" title="字号（磅）">
+      <option value="" selected>字号</option>
+      <option value="21">10.5</option><option value="24">12</option><option value="28">14</option>
+      <option value="32">16</option><option value="36">18</option><option value="44">22</option>
+    </select>
+    <input type="color" id="e-color" title="文字颜色" value="#000000">
+    <span style="width:8px"></span>
+    <button class="ebtn" id="e-undo" title="撤销 (Ctrl+Z)" disabled>↩</button>
+    <button class="ebtn" id="e-redo" title="重做 (Ctrl+Y)" disabled>↪</button>
+    <button class="ebtn" id="e-save" title="保存 (Ctrl+S)，自动留 .bak 备份" style="color:#1e8e3e;border-color:#1e8e3e">保存</button>
+  </div>
   <button class="tbtn" id="btn-recents" title="最近打开">最近 ▾</button>
   <div id="recent-menu"></div>
+  <button class="tbtn" id="btn-edit" title="切换编辑模式" style="width:auto">编辑</button>
   <button class="tbtn" id="btn-update" title="检查更新" style="width:auto">检查更新</button>
   <button id="btn-open">打开文档</button>
   <input type="file" id="file-input" accept=".docx" hidden>
@@ -285,6 +342,7 @@ mark.qdu-hit.qdu-cur { background: #ff8c69; }
 <script src="libs/jszip.min.js"></script>
 <script src="libs/docx-preview.min.js"></script>
 <script src="libs/fflate.min.js"></script>
+<script src="engine/engine.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
