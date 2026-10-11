@@ -1,6 +1,6 @@
 [package]
 name = "qingdu"
-version = "0.1.0"
+version = "0.2.1"
 description = "轻读 — Word 快速阅读器"
 edition = "2021"
 

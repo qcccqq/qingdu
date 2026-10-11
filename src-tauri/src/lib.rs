@@ -38,9 +38,10 @@ struct UpdateInfo {
     url: String,
 }
 
-/// 检查更新：读取仓库最新 Release 的 version.json，与当前版本比较
+/// 检查更新：读取仓库最新 Release 的 version.json，与当前版本（Rust 侧自读）比较
 #[tauri::command]
-fn check_update(current: String) -> Result<UpdateInfo, String> {
+fn check_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
+    let current = app.package_info().version.to_string();
     let body = ureq::get("https://github.com/qcccqq/qingdu/releases/latest/download/version.json")
         .timeout(std::time::Duration::from_secs(30))
         .call()

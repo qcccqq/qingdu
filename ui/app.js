@@ -323,14 +323,14 @@ function doSearch(q) {
 }
 
 /* ================= 打开文件 ================= */
-function openBytes(bytes, name) {
+async function openBytes(bytes, name) {
   clearError();
   hideRecents();
   state.name = name;
   els.filename.textContent = '正在打开 ' + name + ' …';
   try {
     state.buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-    renderCurrent();
+    await renderCurrent();
   } catch (e) {
     state.name = null;
     els.filename.textContent = '';
@@ -368,19 +368,59 @@ async function renderCurrent() {
   els.dropzone.hidden = true;
   els.viewer.hidden = false;
   setGroups(true);
-  fixHeaderWatermarks();
-  paginateAll();
   setZoom(1);
-  updatePageInd();
-  if (lastQuery) doSearch(lastQuery);
+  enhanceWhenReady().then(function () {
+    updatePageInd();
+    if (lastQuery) doSearch(lastQuery);
+  });
 }
 
-/* ============ 渲染后增强：水印页眉转背景 + 长表智能分页 ============ */
+/* ============ 渲染后增强：等图片全部就绪后执行（水印/分页/浮动图/适宽） ============ */
+function enhanceWhenReady() {
+  return new Promise(function (resolve) {
+    var imgs = [].slice.call(els.viewer.querySelectorAll('img'));
+    var pending = imgs.filter(function (im) { return !im.complete; });
+    if (!pending.length) { enhanceNow(); return resolve(); }
+    var left = pending.length, fired = false, tid = null;
+    function one() {
+      if (fired) return;
+      left--;
+      if (left > 0) return;
+      fired = true;
+      clearTimeout(tid);
+      enhanceNow();
+      resolve();
+    }
+    tid = setTimeout(function () { fired = true; enhanceNow(); resolve(); }, 4000);  // 兜底：个别图片 4 秒内没响应也继续
+    pending.forEach(function (im) {
+      im.addEventListener('load', one);
+      im.addEventListener('error', one);
+    });
+  });
+}
+
+function enhanceNow() {
+  fixHeaderWatermarks();
+  paginateAll();
+  renderFloatingAnchors();
+  autoFitIfNeeded();
+}
+
+function autoFitIfNeeded() {
+  var sec = els.viewer.querySelector('section.docx');
+  if (sec && sec.offsetWidth > els.stage.clientWidth - 16) fitWidth();
+}
+window.addEventListener('resize', function () {
+  clearTimeout(window._qduRz);
+  window._qduRz = setTimeout(autoFitIfNeeded, 200);
+});
+
 function fixHeaderWatermarks() {
   document.querySelectorAll('#viewer section.docx').forEach(function (sec) {
     sec.querySelectorAll(':scope > header').forEach(function (h) {
       var big = h.querySelector('img');
-      if (!big || (big.offsetWidth || 0) < 200) return;   // 小页眉保持原样
+      // 用 naturalWidth 判断（不依赖图片是否已完成布局），≥300px 视为水印/大图页眉
+      if (!big || Math.max(big.naturalWidth || 0, big.offsetWidth || 0) < 300) return;
       h.style.position = 'absolute';
       h.style.top = '0'; h.style.left = '0'; h.style.right = '0';
       h.style.zIndex = '0'; h.style.pointerEvents = 'none';
@@ -461,6 +501,92 @@ function paginateSection(section) {
     section.parentNode.insertBefore(cont, section.nextSibling);
     section = cont;
   }
+}
+
+/* ============ VML 文本框修复：foreignObject 被错误嵌套在 rect 内导致文字不可见 ============ */
+function fixVmlTextboxes() {
+  document.querySelectorAll('#viewer svg').forEach(function (svg) {
+    var fo = svg.querySelector('foreignObject');
+    var rect = svg.querySelector('rect');
+    if (fo && rect && fo.parentElement === rect) svg.appendChild(fo);   // 移出 rect → 文字层盖在底色上
+  });
+}
+
+/* ============ 浮动锚定图片补渲染（docx-preview 不支持 wp:anchor） ============ */
+function bytesToB64(bytes) {
+  var bin = '', CH = 0x8000;
+  for (var i = 0; i < bytes.length; i += CH) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + CH, bytes.length)));
+  }
+  return btoa(bin);
+}
+
+function renderFloatingAnchors() {
+  if (!state.buffer) return;
+  try {
+    var zip = fflate.unzipSync(new Uint8Array(state.buffer));
+    var dec = new TextDecoder();
+    var docXml = dec.decode(zip['word/document.xml']);
+    var relsXml = zip['word/_rels/document.xml.rels'] ? dec.decode(zip['word/_rels/document.xml.rels']) : '';
+    var relMap = {};
+    var mR = /Id="([^"]+)"[^>]*Target="([^"]+)"/g, m;
+    while ((m = mR.exec(relsXml))) relMap[m[1]] = m[2].replace(/^\//, '');
+    function mediaUrl(rid) {
+      var t = relMap[rid];
+      if (!t) return null;
+      var key = t.indexOf('/') === 0 ? t.slice(1) : (t.indexOf('media/') === 0 ? 'word/' + t : 'word/' + t);
+      var bytes = zip[key];
+      if (!bytes) return null;
+      var mime = /\.png$/i.test(key) ? 'image/png' : (/\.gif$/i.test(key) ? 'image/gif' : 'image/jpeg');
+      return 'data:' + mime + ';base64,' + bytesToB64(bytes);
+    }
+    var doc = new DOMParser().parseFromString(docXml, 'application/xml');
+    var body = doc.getElementsByTagName('w:body')[0];
+    if (!body) return;
+    // body 直接子元素序号 ↔ 渲染层 article 直接子元素序号 一一对应（已实测验证）
+    var kids = [].filter.call(body.children, function (c) { return c.tagName !== 'w:sectPr'; });
+    var sec = els.viewer.querySelector('section.docx');
+    var art = sec && sec.querySelector(':scope > article');
+    if (!sec || !art) return;
+    var artKids = art.children;
+    kids.forEach(function (child, idx) {
+      var anchors = child.getElementsByTagName ? child.getElementsByTagName('wp:anchor') : [];
+      if (!anchors.length) return;
+      var refEl = artKids[idx];
+      if (!refEl) return;
+      [].forEach.call(anchors, function (an) {
+        var blip = an.getElementsByTagName('a:blip')[0];
+        if (!blip) return;
+        var rid = blip.getAttribute('r:embed') || blip.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'embed');
+        var url = mediaUrl(rid);
+        if (!url) return;
+        var ext = an.getElementsByTagName('wp:extent')[0];
+        var cx = ext ? parseInt(ext.getAttribute('cx') || '0', 10) : 0;
+        var cy = ext ? parseInt(ext.getAttribute('cy') || '0', 10) : 0;
+        var wpx = Math.round(cx / 9525), hpx = Math.round(cy / 9525);
+        var ph = an.getElementsByTagName('wp:positionH')[0];
+        var pv = an.getElementsByTagName('wp:positionV')[0];
+        var hOff = ph ? parseInt((ph.textContent || '0'), 10) / 9525 : 0;
+        var vOff = pv ? parseInt((pv.textContent || '0'), 10) / 9525 : 0;
+        var hRel = ph ? ph.getAttribute('relativeFrom') : 'column';
+        var vRel = pv ? pv.getAttribute('relativeFrom') : 'paragraph';
+        var left = (hRel === 'page') ? hOff : (refEl.offsetLeft || 0) + hOff;
+        var top = (vRel === 'page' || vRel === 'margin') ? vOff : (refEl.offsetTop + vOff);
+        var behind = an.getAttribute('behindDoc') === '1';
+        var img = document.createElement('img');
+        img.src = url;
+        img.style.position = 'absolute';
+        img.style.left = Math.round(left) + 'px';
+        img.style.top = Math.round(top) + 'px';
+        img.style.width = wpx + 'px';
+        img.style.height = hpx + 'px';
+        img.style.zIndex = behind ? '0' : '2';
+        img.style.pointerEvents = 'none';
+        img.alt = '浮动图片';
+        sec.appendChild(img);
+      });
+    });
+  } catch (e) { /* 增强失败不影响基础阅读 */ }
 }
 
 /* ================= 事件绑定 ================= */
@@ -572,9 +698,7 @@ els.btnUpdate.addEventListener('click', function () {
   }
   els.btnUpdate.disabled = true;
   els.btnUpdate.textContent = '检查中…';
-  var current = '';
-  try { current = window.__TAURI__.app.getVersion(); } catch (e) {}
-  tauriInvoke('check_update', { current: current }).then(function (info) {
+  tauriInvoke('check_update', {}).then(function (info) {
     els.btnUpdate.disabled = false;
     els.btnUpdate.textContent = '检查更新';
     if (!info.has_update) {
@@ -604,3 +728,4 @@ if (IS_TAURI) {
     if (e.payload) openByPath(e.payload);
   });
 }
+
