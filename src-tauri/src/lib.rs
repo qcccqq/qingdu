@@ -1,5 +1,12 @@
 // 轻读 — Tauri 原生壳
 // 命令：按路径读取文档、写回原文件（自动 .bak）、检查更新、执行更新
+//
+// 更新安全模型（借鉴 Tauri 官方更新器"更新器是最高价值攻击面"的原则，
+// 采用其弱化版：URL 由 Rust 侧硬编码构造（不信任前端），安装包经
+// SHA-256 清单校验（清单与安装包同源自 Release 下载）；后续可升级
+// 为 minisign 签名校验。
+
+const UPDATE_BASE: &str = "https://github.com/qcccqq/qingdu/releases/latest/download";
 
 /// 按路径读取文件（用于双击 .docx 关联打开、最近文件重开）
 #[tauri::command]
@@ -31,62 +38,73 @@ fn version_gt(a: &str, b: &str) -> bool {
     false
 }
 
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(data);
+    h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 #[derive(serde::Serialize)]
 struct UpdateInfo {
     has_update: bool,
     version: String,
-    url: String,
 }
 
-/// 检查更新：读取仓库最新 Release 的 version.json，与当前版本（Rust 侧自读）比较
+/// 检查更新：读取仓库最新 Release 的 version.json，与当前版本比较
 #[tauri::command]
 fn check_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
     let current = app.package_info().version.to_string();
-    let body = ureq::get("https://github.com/qcccqq/qingdu/releases/latest/download/version.json")
+    let body = ureq::get(&format!("{}/version.json", UPDATE_BASE))
         .timeout(std::time::Duration::from_secs(30))
         .call()
         .map_err(|e| format!("无法连接更新服务器: {}", e))?
         .into_string()
         .map_err(|e| e.to_string())?;
-    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    // 容错：剥掉可能存在的 UTF-8 BOM（serde_json 不接受 BOM）
+    let body = body.trim_start_matches('\u{feff}');
+    let v: serde_json::Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
     let latest = v["version"].as_str().unwrap_or("").to_string();
     if latest.is_empty() {
         return Err("更新信息格式异常".into());
     }
     Ok(UpdateInfo {
         has_update: version_gt(&latest, &current),
-        version: latest.clone(),
-        url: "https://github.com/qcccqq/qingdu/releases/latest/download/qingdu-Setup.exe".into(),
+        version: latest,
     })
 }
 
-/// 执行更新：下载安装包到临时目录，启动安装器后退出本应用
+/// 执行更新：下载安装包与校验清单，SHA-256 一致才启动安装器
 #[tauri::command]
-fn perform_update(url: String, app: tauri::AppHandle) -> Result<(), String> {
-    let path = std::env::temp_dir().join("qingdu-Setup.exe");
-    let resp = ureq::get(&url)
-        .timeout(std::time::Duration::from_secs(600))
-        .call()
-        .map_err(|e| format!("下载失败: {}", e))?;
-    let mut reader = resp.into_reader();
-    let mut f = std::fs::File::create(&path).map_err(|e| format!("创建文件失败: {}", e))?;
-    std::io::copy(&mut reader, &mut f).map_err(|e| format!("保存失败: {}", e))?;
-    drop(f);
-    // 校验文件头：必须是 PE 可执行文件（MZ），防止下到错误内容
-    let mut head = [0u8; 2];
-    use std::io::Read;
-    std::fs::File::open(&path)
-        .and_then(|mut h| h.read_exact(&mut head))
-        .map_err(|e| e.to_string())?;
-    if &head != b"MZ" {
-        let _ = std::fs::remove_file(&path);
-        return Err("下载内容异常，已取消更新".into());
+fn perform_update() -> Result<(), String> {
+    let dl = |name: &str| -> Result<Vec<u8>, String> {
+        let resp = ureq::get(&format!("{}/{}", UPDATE_BASE, name))
+            .timeout(std::time::Duration::from_secs(600))
+            .call()
+            .map_err(|e| format!("下载 {} 失败: {}", name, e))?;
+        let mut reader = resp.into_reader();
+        let mut buf = Vec::new();
+        std::io::copy(&mut reader, &mut buf).map_err(|e| format!("读取 {} 失败: {}", name, e))?;
+        Ok(buf)
+    };
+    let manifest = dl("version.json")?;
+    let manifest = String::from_utf8_lossy(&manifest);
+    let manifest = manifest.trim_start_matches('\u{feff}');
+    let v: serde_json::Value = serde_json::from_str(manifest).map_err(|e| format!("更新信息格式异常: {}", e))?;
+    let expect = v["sha256"].as_str().unwrap_or("").to_lowercase();
+    if expect.len() != 64 {
+        return Err("更新清单缺少校验值，已取消更新".into());
     }
+    let exe = dl("qingdu-Setup.exe")?;
+    if sha256_hex(&exe) != expect {
+        return Err("安装包校验不一致（可能下载不完整），已取消更新".into());
+    }
+    let path = std::env::temp_dir().join("qingdu-Setup.exe");
+    std::fs::write(&path, &exe).map_err(|e| format!("保存失败: {}", e))?;
     std::process::Command::new(&path)
         .spawn()
         .map_err(|e| format!("启动安装器失败: {}", e))?;
-    app.exit(0);
-    Ok(())
+    std::process::exit(0);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

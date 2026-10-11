@@ -410,22 +410,14 @@ function parseDocExtras() {
         state.fieldInfo[part] = state.fieldInfo[part].concat(fields);
       });
     });
-    // 2) 每个顶层表格的“标题行”数量（w:tblHeader，Word 跨页重复表头）
+    // 2) 每个顶层表格的"标题行"数量（w:tblHeader，Word 跨页重复表头；供未来真分页使用）
     var doc = new DOMParser().parseFromString(dec.decode(zip['word/document.xml']), 'application/xml');
     var body = doc.getElementsByTagName('w:body')[0];
     var tblOrd = -1;
     [].forEach.call(body.children, function (child) {
       if (child.tagName === 'w:tbl') {
         tblOrd++;
-        var hdr = 0;
-        [].forEach.call(child.getElementsByTagName('w:tr'), function (tr) {
-          if (hdr === 0 || tr.getElementsByTagName('w:tblHeader').length) {
-            if (tr.getElementsByTagName('w:tblHeader').length) hdr++;
-            else if (hdr === 0 && tr.getElementsByTagName('w:tblHeader').length === 0 && hdr === 0 && tr === child.getElementsByTagName('w:tr')[0] && tr.getElementsByTagName('w:tblHeader').length) hdr++;
-          }
-        });
-        // 简化：统计表内带 tblHeader 的行数（Word 规定它们位于表头）
-        hdr = [].filter.call(child.getElementsByTagName('w:tr'), function (tr) {
+        var hdr = [].filter.call(child.getElementsByTagName('w:tr'), function (tr) {
           return tr.getElementsByTagName('w:tblHeader').length > 0;
         }).length;
         if (hdr) state.tableHeaderRows[tblOrd] = hdr;
@@ -434,10 +426,12 @@ function parseDocExtras() {
   } catch (e) { /* 解析失败不影响阅读 */ }
 }
 
-/* ============ 页码字段实算：连续视图下用真实页序替换 Word 缓存值 ============ */
+/* ============ 页码字段实算：仅在多节（真实分页）文档启用； ============
+   单节连续视图下页脚保留 Word 缓存值（实算反而会把"共3页"误写成"共1页"） */
 function fixPageFields() {
   if (!state.fieldInfo) return;
   var secs = Array.prototype.slice.call(els.viewer.querySelectorAll('section.docx'));
+  if (secs.length < 2) return;
   var N = secs.length;
   secs.forEach(function (sec, i) {
     ['header', 'footer'].forEach(function (part) {
@@ -798,7 +792,7 @@ els.btnUpdate.addEventListener('click', function () {
     }
     if (window.confirm('发现新版本 ' + info.version + '，立即更新吗？\n\n下载完成后安装器将自动启动，当前软件会关闭。')) {
       els.btnUpdate.textContent = '下载中…';
-      tauriInvoke('perform_update', { url: info.url }).catch(function (e) {
+      tauriInvoke('perform_update', {}).catch(function (e) {
         els.btnUpdate.disabled = false;
         els.btnUpdate.textContent = '检查更新';
         showError('更新失败：' + e);

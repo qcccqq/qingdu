@@ -33,13 +33,17 @@ jobs:
           path: src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
-      - name: 整理发布物（固定名安装包 + 版本信息）
+      - name: 整理发布物（固定名安装包 + 版本信息 + SHA-256）
         shell: pwsh
         run: |
           $exe = Get-ChildItem "src-tauri/target/release/bundle/nsis/*.exe" | Select-Object -First 1
           Copy-Item $exe.FullName "qingdu-Setup.exe"
           $ver = (Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json).version
-          @{ version = $ver } | ConvertTo-Json | Set-Content "version.json" -Encoding utf8
+          $hash = (Get-FileHash "qingdu-Setup.exe" -Algorithm SHA256).Hash.ToLower()
+          $json = @{ version = $ver; sha256 = $hash } | ConvertTo-Json -Compress
+          # WriteAllText 写 UTF-8 无 BOM（Set-Content -Encoding UTF8 在 Windows PowerShell 会写 BOM，serde_json 无法解析）
+          [System.IO.File]::WriteAllText("$PWD/version.json", $json)
+          Write-Output "version=$ver sha256=$hash"
 
       - name: 发布 Release（latest 标签，供应用内更新）
         uses: softprops/action-gh-release@v2
