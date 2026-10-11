@@ -26,9 +26,28 @@ jobs:
       - name: 构建轻读
         run: cargo tauri build
 
-      - name: 上传安装包
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: qingdu-setup-x64
           path: src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
+
+      - name: 整理发布物（固定名安装包 + 版本信息）
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "src-tauri/target/release/bundle/nsis/*.exe" | Select-Object -First 1
+          Copy-Item $exe.FullName "qingdu-Setup.exe"
+          $ver = (Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json).version
+          @{ version = $ver } | ConvertTo-Json | Set-Content "version.json" -Encoding utf8
+
+      - name: 发布 Release（latest 标签，供应用内更新）
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: 轻读 最新版
+          files: |
+            qingdu-Setup.exe
+            version.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

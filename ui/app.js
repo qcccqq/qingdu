@@ -39,7 +39,8 @@ var els = {
   zoomFit: document.getElementById('zoom-fit'),
   zoomVal: document.getElementById('zoomval'),
   btnRecents: document.getElementById('btn-recents'),
-  recentMenu: document.getElementById('recent-menu')
+  recentMenu: document.getElementById('recent-menu'),
+  btnUpdate: document.getElementById('btn-update')
 };
 
 var state = { name: null, buffer: null, path: null };
@@ -562,6 +563,40 @@ window.addEventListener('keydown', function (e) {
     e.preventDefault(); setZoom(1);
   }
 });
+
+/* ================= 应用内更新 ================= */
+els.btnUpdate.addEventListener('click', function () {
+  if (!IS_TAURI) {
+    showError('应用内更新仅桌面版可用。\n浏览器版请到仓库 Releases 页面下载新安装包。');
+    return;
+  }
+  els.btnUpdate.disabled = true;
+  els.btnUpdate.textContent = '检查中…';
+  var current = '';
+  try { current = window.__TAURI__.app.getVersion(); } catch (e) {}
+  tauriInvoke('check_update', { current: current }).then(function (info) {
+    els.btnUpdate.disabled = false;
+    els.btnUpdate.textContent = '检查更新';
+    if (!info.has_update) {
+      els.btnUpdate.textContent = '已是最新';
+      setTimeout(function () { els.btnUpdate.textContent = '检查更新'; }, 2500);
+      return;
+    }
+    if (window.confirm('发现新版本 ' + info.version + '，立即更新吗？\n\n下载完成后安装器将自动启动，当前软件会关闭。')) {
+      els.btnUpdate.textContent = '下载中…';
+      tauriInvoke('perform_update', { url: info.url }).catch(function (e) {
+        els.btnUpdate.disabled = false;
+        els.btnUpdate.textContent = '检查更新';
+        showError('更新失败：' + e);
+      });
+    }
+  }).catch(function (e) {
+    els.btnUpdate.disabled = false;
+    els.btnUpdate.textContent = '检查更新';
+    showError('检查更新失败：' + e);
+  });
+});
+if (!IS_TAURI) els.btnUpdate.style.display = 'none';
 
 /* ================= Tauri 启动事件：双击 .docx 关联打开 ================= */
 if (IS_TAURI) {
