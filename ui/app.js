@@ -234,12 +234,20 @@ function setZoom(z) {
   applyZoom();
   updatePageInd();
 }
+function setZoomUser(z) {
+  state.userZoom = Math.min(2.5, Math.max(0.5, z));
+  setZoom(state.userZoom);
+}
 function fitWidth() {
   var sec = els.viewer.querySelector('section.docx');
   if (!sec) return;
   var base = sec.offsetWidth / zoom;
   var avail = els.stage.clientWidth - 56;
   if (base > 0) setZoom(avail / base);
+}
+function fitWidthUser() {
+  fitWidth();
+  state.userZoom = zoom;
 }
 
 function getSections() {
@@ -484,7 +492,10 @@ function enhanceNow() {
   paginateAll();
   renderFloatingAnchors();
   fixPageFields();
-  autoFitIfNeeded();
+  // 默认缩放策略（对齐主流阅读器：预览型阅读器默认适合宽度）：
+  // 用户本次会话手动调过缩放 → 尊重其选择；否则自动适合宽度
+  if (state.userZoom) setZoom(state.userZoom);
+  else autoFitIfNeeded();
 }
 
 function autoFitIfNeeded() {
@@ -746,9 +757,9 @@ els.hitPrev.addEventListener('click', function () { gotoHit(hitIdx - 1); });
 els.hitNext.addEventListener('click', function () { gotoHit(hitIdx + 1); });
 els.pagePrev.addEventListener('click', function () { gotoPage(-1); });
 els.pageNext.addEventListener('click', function () { gotoPage(1); });
-els.zoomIn.addEventListener('click', function () { setZoom(zoom + 0.1); });
-els.zoomOut.addEventListener('click', function () { setZoom(zoom - 0.1); });
-els.zoomFit.addEventListener('click', fitWidth);
+els.zoomIn.addEventListener('click', function () { setZoomUser(zoom + 0.1); });
+els.zoomOut.addEventListener('click', function () { setZoomUser(zoom - 0.1); });
+els.zoomFit.addEventListener('click', fitWidthUser);
 els.btnRecents.addEventListener('click', function (e) {
   e.stopPropagation();
   if (els.recentMenu.classList.contains('on')) hideRecents(); else showRecents();
@@ -757,7 +768,7 @@ document.addEventListener('click', function (e) {
   if (!els.recentMenu.contains(e.target) && e.target !== els.btnRecents) hideRecents();
 });
 els.viewer.addEventListener('wheel', function (e) {
-  if (e.ctrlKey) { e.preventDefault(); setZoom(zoom + (e.deltaY < 0 ? 0.1 : -0.1)); }
+  if (e.ctrlKey) { e.preventDefault(); setZoomUser(zoom + (e.deltaY < 0 ? 0.1 : -0.1)); }
 }, { passive: false });
 window.addEventListener('keydown', function (e) {
   if (e.ctrlKey && e.key.toLowerCase() === 'f') {
@@ -768,11 +779,11 @@ window.addEventListener('keydown', function (e) {
     e.preventDefault();
     gotoHit(hitIdx + (e.shiftKey ? -1 : 1));
   } else if (e.ctrlKey && (e.key === '=' || e.key === '+')) {
-    e.preventDefault(); setZoom(zoom + 0.1);
+    e.preventDefault(); setZoomUser(zoom + 0.1);
   } else if (e.ctrlKey && e.key === '-') {
-    e.preventDefault(); setZoom(zoom - 0.1);
+    e.preventDefault(); setZoomUser(zoom - 0.1);
   } else if (e.ctrlKey && e.key === '0') {
-    e.preventDefault(); setZoom(1);
+    e.preventDefault(); state.userZoom = null; setZoom(1);
   }
 });
 
