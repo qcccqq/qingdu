@@ -218,9 +218,15 @@ function showHome() {
 }
 function hideHome() { els.home.hidden = true; }
 function fillHomeVersion() {
-  var v = '浏览器版';
-  if (IS_TAURI) { try { v = 'v' + window.__TAURI__.app.getVersion(); } catch (e) {} }
-  els.homeVer.textContent = '轻读 ' + v;
+  if (IS_TAURI) {
+    // Tauri 2 的 getVersion() 返回 Promise —— 必须异步填充，同步拼接会得到 "[object Promise]"
+    els.homeVer.textContent = '轻读';
+    window.__TAURI__.app.getVersion().then(function (v) {
+      els.homeVer.textContent = '轻读 v' + v;
+    }).catch(function () {});
+  } else {
+    els.homeVer.textContent = '轻读 浏览器版';
+  }
 }
 function renderHomeRecents() {
   var list = els.homeRecentList;
@@ -882,12 +888,17 @@ els.btnUpdate.addEventListener('click', function () {
   }
   els.upLog.innerHTML = '';
   els.updatePanel.classList.add('on');
-  var current = '';
-  try { current = window.__TAURI__.app.getVersion(); } catch (e) {}
-  upLog('当前版本 ' + current + '，正在连接更新服务器…');
   els.btnUpdate.disabled = true;
   els.btnUpdate.textContent = '检查中…';
-  tauriInvoke('check_update', {}).then(function (info) {
+  function logCurrentThen(fn) {
+    // getVersion() 是异步 API：先拿版本再继续，避免同步拼接出 "[object Promise]"
+    if (IS_TAURI) {
+      window.__TAURI__.app.getVersion().then(function (v) { upLog('当前版本 ' + v + '，正在连接更新服务器…'); fn(); })
+        .catch(function () { upLog('正在连接更新服务器…'); fn(); });
+    } else { upLog('正在连接更新服务器…'); fn(); }
+  }
+  logCurrentThen(function () {
+    tauriInvoke('check_update', {}).then(function (info) {
     els.btnUpdate.disabled = false;
     els.btnUpdate.textContent = '检查更新';
     if (!info.has_update) {
@@ -914,6 +925,7 @@ els.btnUpdate.addEventListener('click', function () {
     els.btnUpdate.disabled = false;
     els.btnUpdate.textContent = '检查更新';
     upLog('检查更新失败：' + e, 'err');
+  });
   });
 });
 if (!IS_TAURI) els.btnUpdate.style.display = 'none';
