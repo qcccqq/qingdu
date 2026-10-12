@@ -662,8 +662,15 @@ function applyTableRowHeights() {
     if (!body) return;
     // 只按"表格出现顺序"对齐（第 N 张源表 = 第 N 张渲染表）：
     // 与段落级子元素序解耦，docx-preview 渲染层的杂项节点不会造成错位。
+    // 源表按文档序穿透收集（w:sdt 内容控件里包着的表也要算，否则后续表全部错位）。
     // 注意层级：#viewer > .docx-wrapper > section.docx > article（section 不是 viewer 直接子元素）
-    var srcTables = [].filter.call(body.children, function (c) { return c.tagName === 'w:tbl'; });
+    var srcTables = [];
+    [].forEach.call(body.children, function (c) {
+      if (c.tagName === 'w:tbl') srcTables.push(c);
+      else if (c.getElementsByTagName) {
+        [].forEach.call(c.getElementsByTagName('w:tbl'), function (t) { srcTables.push(t); });
+      }
+    });
     var dstTables = [];
     els.viewer.querySelectorAll('section.docx > article').forEach(function (a) {
       [].forEach.call(a.children, function (c) { if (c.tagName === 'TABLE') dstTables.push(c); });
