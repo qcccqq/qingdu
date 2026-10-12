@@ -306,18 +306,18 @@ var QingDuEngine = (function () {
     return out;
   }
 
-  /* 全部可编辑段落：顶层 w:p + 表格内 w:p（含嵌套表），严格文档序。
+  /* 全部可编辑段落：按文档序收录 body 每个子元素（除 w:sectPr）内的全部 w:p 后代。
+     覆盖：顶层 w:p、表格内 w:p（含嵌套表）、w:sdt 内容控件内的 w:p
+     （现代 Word 文档常见，docx-preview 会把 sdt 内容渲染成普通段落）。
      与渲染层 "#viewer article > p, #viewer table p" 的 DOM 文档序一一对应。 */
   function allParagraphs(doc) {
     var out = [], kids = doc.body.children;
     for (var i = 0; i < kids.length; i++) {
       var k = kids[i];
-      if (k.tagName === "w:p") {
-        out.push(k);
-      } else if (k.tagName === "w:tbl") {
-        var ps = toArray(k.getElementsByTagName("w:p"));
-        for (var j = 0; j < ps.length; j++) out.push(ps[j]);
-      }
+      if (k.tagName === "w:sectPr") continue;
+      if (k.tagName === "w:p") out.push(k);
+      var ps = toArray(k.getElementsByTagName("w:p"));
+      for (var j = 0; j < ps.length; j++) out.push(ps[j]);
     }
     return out;
   }
@@ -595,6 +595,40 @@ var QingDuEngine = (function () {
     };
   }
 
+  /* 合并到上一段：把本段除 pPr 外的子元素整体搬到前一个元素兄弟 w:p 尾部，
+     然后移除本段（Word 里"段首退格"的语义；各 run 的 rPr 随搬保留）。
+     前提：本段的前一个元素兄弟必须是 w:p（跨表格边界不合并，调用方负责判断）。
+     空段落合并 = 只删段落标记。undo = 移回子元素 + 原位重挂段落。 */
+  function MergeWithPrevCmd(p) {
+    var snap = null;   // { prev, moved: [非 pPr 子元素] }
+    return {
+      label: "合并段落",
+      do: function () {
+        if (!snap) {
+          if (!p.parentNode) throw new Error("合并失败：段落不在文档树中");
+          var prev = p.previousElementSibling;
+          if (!prev || prev.tagName !== "w:p") {
+            throw new Error("上一段落不存在或不可合并，拒绝操作");
+          }
+          var moved = [], kids = p.children, i;
+          for (i = 0; i < kids.length; i++) {
+            if (kids[i].tagName !== "w:pPr") moved.push(kids[i]);
+          }
+          snap = { prev: prev, moved: moved };
+        }
+        for (var j = 0; j < snap.moved.length; j++) {
+          if (snap.moved[j].parentNode === p) snap.prev.appendChild(snap.moved[j]);
+        }
+        if (p.parentNode) p.parentNode.removeChild(p);
+      },
+      undo: function () {
+        if (!snap) return;
+        for (var i = 0; i < snap.moved.length; i++) p.appendChild(snap.moved[i]);
+        snap.prev.parentNode.insertBefore(p, snap.prev.nextSibling || null);
+      }
+    };
+  }
+
   /* 删字符：删除段落文本 offset 处的一个字符（要退格语义就传 offset - 1）。
      undo 还原 do 之前全部 w:t 的原值。 */
   function DeleteCharCmd(p, offset) {
@@ -677,6 +711,7 @@ var QingDuEngine = (function () {
     SetFontSizeCmd: SetFontSizeCmd,
     SetColorCmd: SetColorCmd,
     SplitParagraphCmd: SplitParagraphCmd,
+    MergeWithPrevCmd: MergeWithPrevCmd,
     DeleteCharCmd: DeleteCharCmd,
     FormatRangeCmd: FormatRangeCmd,
     FormatBoldRangeCmd: FormatBoldRangeCmd,

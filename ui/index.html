@@ -19,8 +19,13 @@
 :root {
   --topbar-h: 52px;
   --accent: #2e74b5;
-  --bg: #808080;
-  --line: #e0e0e0;
+  --bg: #eef0f4;
+  --line: #e4e7ec;
+  /* 纸张三层阴影：接触阴影 + 近投影 + 环境漫射 */
+  --paper-shadow:
+    0 1px 2px rgba(23,32,52,.12),
+    0 5px 12px rgba(23,32,52,.09),
+    0 20px 44px rgba(23,32,52,.13);
   /* 动效令牌：统一时长与缓动（所有新动画必须引用） */
   --dur-fast: 120ms;      /* 微交互：按钮反馈 */
   --dur-normal: 200ms;    /* 面板：hover/展开 */
@@ -133,23 +138,29 @@ body {
   top: var(--topbar-h);
   left: 0; right: 0; bottom: 0;
   overflow: auto;
+  /* 阅读区底色：近白冷灰分层渐变 + 顶部微光 + 细噪点（纸张舞台，不喧宾夺主） */
+  background-color: var(--bg);
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E"),
+    radial-gradient(900px 380px at 50% -8%, rgba(255,255,255,.9), rgba(255,255,255,0) 70%),
+    linear-gradient(180deg, #f6f7fa 0%, #ebedf2 100%);
 }
 #stage::-webkit-scrollbar { width: 12px; height: 12px; }
-#stage::-webkit-scrollbar-thumb { background: #aab2bd; border-radius: 6px; border: 3px solid var(--bg); }
-#stage::-webkit-scrollbar-track { background: transparent; }
-#dropzone {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  cursor: pointer;
+#stage::-webkit-scrollbar-thumb {
+  background: #b6bec9; border-radius: 6px;
+  border: 3px solid transparent; background-clip: padding-box;
 }
-#dropzone[hidden] { display: none; }
-#dropzone .dz-icon { font-size: 64px; }
-#dropzone .dz-title { font-size: 22px; color: #fff; font-weight: 600; }
-#dropzone .dz-hint { font-size: 13px; color: rgba(255,255,255,.85); }
+#stage::-webkit-scrollbar-thumb:hover { background: #9aa4b1; background-clip: padding-box; }
+#stage::-webkit-scrollbar-track { background: transparent; }
+
+/* ============ 纸张：docx-preview 自带灰底全部让位于舞台底色 ============ */
+#viewer .docx-wrapper { background: transparent; padding: 30px 24px 48px; }
+#viewer .docx-wrapper > section.docx {
+  margin: 0 auto 18px;
+  border-radius: 4px;
+  box-shadow: var(--paper-shadow);
+}
+#viewer .docx-wrapper > section.docx:last-child { margin-bottom: 0; }
 
 /* ============ 首页（空状态）============ */
 #home {
@@ -219,10 +230,13 @@ body {
 #stage.dragging::after {
   content: "";
   position: absolute; inset: 10px;
-  border: 3px dashed #cfe3f7;
-  border-radius: 10px;
+  border: 2px dashed rgba(46,116,181,.55);
+  border-radius: 12px;
+  background: rgba(46,116,181,.05);
   pointer-events: none;
+  animation: dragIn var(--dur-normal) var(--ease);
 }
+@keyframes dragIn { from { opacity: 0; } to { opacity: 1; } }
 #viewer { min-height: 100%; }
 #viewer[hidden] { display: none; }
 #viewer.doc-in .docx-wrapper { animation: docIn .35s ease both; }
@@ -256,12 +270,16 @@ mark.qdu-hit.qdu-cur { background: #ff8c69; animation: hitBounce var(--dur-slow)
 }
 #edit-bar.on { display: flex; }
 #edit-tip {
-  position: fixed; top: var(--topbar-h); left: 0; right: 0;
-  background: #2e74b5; color: #fff;
-  font-size: 12px; text-align: center; padding: 4px 0;
-  z-index: 40; display: none;
+  position: fixed; top: calc(var(--topbar-h) + 12px); left: 50%;
+  transform: translate(-50%, -8px);
+  background: rgba(31,38,52,.92); color: #fff;
+  font-size: 12px; padding: 7px 18px; border-radius: 999px;
+  box-shadow: 0 6px 24px rgba(23,32,52,.28);
+  z-index: 40;
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--dur-normal) var(--ease), transform var(--dur-normal) var(--ease);
 }
-#edit-tip.on { display: block; }
+#edit-tip.on { opacity: 1; transform: translate(-50%, 0); }
 
 /* ============ 打开骨架屏（性能感知优化） ============ */
 #skeleton {
@@ -274,9 +292,9 @@ mark.qdu-hit.qdu-cur { background: #ff8c69; animation: hitBounce var(--dur-slow)
 #skeleton.on { display: flex; }
 .sk-page {
   width: 692px; max-width: 88%;
-  background: #fff; border-radius: 2px;
+  background: #fff; border-radius: 4px;
   position: relative; overflow: hidden;
-  box-shadow: 0 2px 12px rgba(0,0,0,.18);
+  box-shadow: var(--paper-shadow);
 }
 .sk-page::after {
   content: ""; position: absolute; inset: 0;
@@ -288,21 +306,21 @@ mark.qdu-hit.qdu-cur { background: #ff8c69; animation: hitBounce var(--dur-slow)
 .sk-line { height: 10px; border-radius: 5px; background: #e8e8e8; margin: 14px 56px; }
 .sk-line.w60 { width: 60%; margin-left: auto; margin-right: auto; }
 .sk-line.w35 { width: 35%; }
-body.editing #viewer p[contenteditable] {
-  outline: 1px dashed rgba(46,116,181,.55);
-  outline-offset: 2px;
+/* 可编辑视觉：默认静默（全文档可编不再是特殊状态）；
+   hover 轻微着色提示可点，聚焦段落才有明显边界 */
+body.editing #viewer p[contenteditable="true"] {
   cursor: text;
+  border-radius: 2px;
+  transition: background var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
-body.editing #viewer p[contenteditable]:hover {
-  outline: 1px solid rgba(46,116,181,.8);
-  background: rgba(46,116,181,.05);
+body.editing #viewer p[contenteditable="true"]:hover {
+  background: rgba(46,116,181,.035);
+  box-shadow: 0 0 0 1px rgba(46,116,181,.10);
 }
-body.editing #viewer p[contenteditable] {
-  transition: outline-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
-}
-body.editing #viewer p[contenteditable]:focus {
-  outline: 2px solid #2e74b5;
-  background: rgba(46,116,181,.04);
+body.editing #viewer p[contenteditable="true"]:focus {
+  outline: 2px solid rgba(46,116,181,.4);
+  outline-offset: 2px;
+  background: rgba(46,116,181,.03);
 }
 #e-save.saved {
   color: #fff; background: #1e8e3e; border-color: #1e8e3e;
@@ -358,14 +376,14 @@ body.editing #btn-edit { background: #2e74b5; color: #fff; border-color: #2e74b5
     <button class="tbtn" id="zoom-fit" title="适应宽度" style="width:auto">适宽</button>
   </div>
   <div id="edit-bar">
-    <button class="ebtn bold" id="e-bold" title="加粗（作用于本段首个文字块）">B</button>
-    <button class="ebtn italic" id="e-italic" title="倾斜">I</button>
-    <select id="e-fontsize" title="字号（磅）">
+    <button class="ebtn bold" id="e-bold" title="加粗（选中文字或当前段落）">B</button>
+    <button class="ebtn italic" id="e-italic" title="倾斜（选中文字或当前段落）">I</button>
+    <select id="e-fontsize" title="字号（磅，选中文字或当前段落）">
       <option value="" selected>字号</option>
       <option value="21">10.5</option><option value="24">12</option><option value="28">14</option>
       <option value="32">16</option><option value="36">18</option><option value="44">22</option>
     </select>
-    <input type="color" id="e-color" title="文字颜色" value="#000000">
+    <input type="color" id="e-color" title="文字颜色（选中文字或当前段落）" value="#000000">
     <span style="width:8px"></span>
     <button class="ebtn" id="e-undo" title="撤销 (Ctrl+Z)" disabled>↩</button>
     <button class="ebtn" id="e-redo" title="重做 (Ctrl+Y)" disabled>↪</button>
@@ -408,6 +426,7 @@ body.editing #btn-edit { background: #2e74b5; color: #fff; border-color: #2e74b5
   <div id="error" hidden title="点击返回首页"></div>
 </main>
 <div id="update-panel"><div class="up-title">更新日志</div><div id="up-log"></div></div>
+<div id="edit-tip"></div>
 <script src="libs/jszip.min.js"></script>
 <script src="libs/docx-preview.min.js"></script>
 <script src="libs/fflate.min.js"></script>

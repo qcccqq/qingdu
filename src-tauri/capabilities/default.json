@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "default",
+  "description": "主窗口权限：核心 API + 原生文件打开对话框（最小授权，只放开用到的）",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open"
+  ]
+}

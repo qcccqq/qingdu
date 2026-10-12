@@ -806,7 +806,14 @@ function renderFloatingAnchors() {
 els.btnOpen.addEventListener('click', function () {
   hideRecents();
   if (IS_TAURI) {
-    els.fileInput.click();
+    // Tauri：系统原生文件对话框（tauri-plugin-dialog）→ 拿真实绝对路径
+    // → openByPath：最近列表、原位保存（.bak）全部打通
+    window.__TAURI__.dialog.open({
+      multiple: false,
+      filters: [{ name: 'Word 文档', extensions: ['docx'] }]
+    }).then(function (p) {
+      if (p) openByPath(p);
+    }).catch(function () {});
   } else if (window.showOpenFilePicker) {
     window.showOpenFilePicker({
       types: [{ description: 'Word 文档', accept: { 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'] } }],
@@ -827,38 +834,57 @@ els.fileInput.addEventListener('change', function () {
   els.fileInput.value = '';
 });
 
+/* 拖放打开：
+   · Tauri：原生拖放事件（tauri://drag-*）带绝对路径 → openByPath（可入最近、可原位保存）
+   · 浏览器：HTML5 拖放（File 对象，无路径 → 打开后走下载副本保存） */
 var dragDepth = 0;
-window.addEventListener('dragenter', function (e) {
-  e.preventDefault();
-  dragDepth++;
-  els.stage.classList.add('dragging');
-});
-window.addEventListener('dragleave', function (e) {
-  e.preventDefault();
-  dragDepth = Math.max(0, dragDepth - 1);
-  if (dragDepth === 0) els.stage.classList.remove('dragging');
-});
-window.addEventListener('dragover', function (e) { e.preventDefault(); });
-window.addEventListener('drop', function (e) {
-  e.preventDefault();
-  dragDepth = 0;
-  els.stage.classList.remove('dragging');
-  var dt = e.dataTransfer;
-  var f = dt && dt.files && dt.files[0];
-  if (!f) return;
-  if (!IS_TAURI && dt.items) {
-    for (var i = 0; i < dt.items.length; i++) {
-      if (dt.items[i].getAsFileSystemHandle) {
-        (function (idx) {
-          dt.items[idx].getAsFileSystemHandle().then(function (h) {
-            if (h && state.name === f.name) saveRecentHandle(f.name, h);
-          }).catch(function () {});
-        })(i);
+if (IS_TAURI) {
+  window.__TAURI__.event.listen('tauri://drag-enter', function () {
+    dragDepth = 1; els.stage.classList.add('dragging');
+  });
+  window.__TAURI__.event.listen('tauri://drag-leave', function () {
+    dragDepth = 0; els.stage.classList.remove('dragging');
+  });
+  window.__TAURI__.event.listen('tauri://drag-drop', function (e) {
+    dragDepth = 0; els.stage.classList.remove('dragging');
+    var paths = (e.payload && e.payload.paths) || [];
+    for (var i = 0; i < paths.length; i++) {
+      if (/\.docx$/i.test(paths[i])) { openByPath(paths[i]); return; }
+    }
+  });
+} else {
+  window.addEventListener('dragenter', function (e) {
+    e.preventDefault();
+    dragDepth++;
+    els.stage.classList.add('dragging');
+  });
+  window.addEventListener('dragleave', function (e) {
+    e.preventDefault();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) els.stage.classList.remove('dragging');
+  });
+  window.addEventListener('dragover', function (e) { e.preventDefault(); });
+  window.addEventListener('drop', function (e) {
+    e.preventDefault();
+    dragDepth = 0;
+    els.stage.classList.remove('dragging');
+    var dt = e.dataTransfer;
+    var f = dt && dt.files && dt.files[0];
+    if (!f) return;
+    if (dt.items) {
+      for (var i = 0; i < dt.items.length; i++) {
+        if (dt.items[i].getAsFileSystemHandle) {
+          (function (idx) {
+            dt.items[idx].getAsFileSystemHandle().then(function (h) {
+              if (h && state.name === f.name) saveRecentHandle(f.name, h);
+            }).catch(function () {});
+          })(i);
+        }
       }
     }
-  }
-  openFile(f);
-});
+    openFile(f);
+  });
+}
 
 els.searchInput.addEventListener('input', function () {
   var q = els.searchInput.value.trim();
@@ -961,7 +987,7 @@ els.btnUpdate.addEventListener('click', function () {
 });
 if (!IS_TAURI) els.btnUpdate.style.display = 'none';
 
-/* ================= Tauri 事件：更新进度实时上报 ================= */
+/* ================= Tauri 事件：更新进度 + 关联打开 ================= */
 if (IS_TAURI) {
   window.__TAURI__.event.listen('update-log', function (e) {
     var payload = e.payload || '';
@@ -971,47 +997,89 @@ if (IS_TAURI) {
   window.__TAURI__.event.listen('open-file', function (e) {
     if (e.payload) openByPath(e.payload);
   });
+  /* 关联启动（双击 .docx / 右键打开方式 / QQ 转发）：
+     拉模式 —— 前端就绪后主动取 Rust 侧暂存的路径，零竞态 */
+  tauriInvoke('get_pending_doc', {}).then(function (p) {
+    if (p) openByPath(p);
+  }).catch(function () {});
 }
 
-/* ================= 编辑模式（v0.3.1：引擎接线） =================
-   架构：XML 树（QingDuEngine）= 唯一事实源；渲染 DOM 只是投影。
-   输入：双击段落进入原生编辑（中文输入法体验完好），
-         失焦时把 DOM 文本差异作为 SetTextCmd 提交引擎；
-   撤销/重做/格式命令：引擎改树 → serialize → 全量重绘 + 恢复滚动；
+/* ================= 编辑（v0.5.0：阅读编辑一体，单击即编） =================
+   架构不变：XML 树（QingDuEngine）= 唯一事实源；渲染 DOM 只是投影。
+   v0.5.0 去掉"先点编辑再双击"的两级门槛（对齐 WPS/Word 的使用直觉）：
+     · 文档打开 + 引擎段落对齐检查通过 → 自动可编辑：每个段落是独立的
+       contenteditable 块（Editor.js 式块编辑范式），单击即在光标处落点，
+       中文输入法走浏览器原生路径；
+     · 格式工具栏随文档常驻；"只读"按钮临时锁定纯阅读；
+     · Enter = 分段（SplitParagraphCmd，光标落新段开头）；
+       段首退格 = 并入上一段（MergeWithPrevCmd，光标落拼接处）；
+     · 段落失焦时 DOM 文本差异作为 SetTextCmd 提交引擎；
+       撤销/重做/格式命令 = 引擎改树 → serialize → 全量重绘 + 恢复滚动与光标；
+     · 引擎解析失败或段落对不上 → 整份文档降级为纯阅读（阅读功能不受影响）。
    保存：serialize → Tauri 原位写回（自动 .bak）/ 浏览器版下载副本。 */
-var edit = { on: false, doc: null, stack: null, paras: [], domParas: [], activeIdx: -1, savedDepth: 0, sel: null };
+var edit = { active: false, locked: false, doc: null, stack: null, paras: [], domParas: [], activeIdx: -1, savedDepth: 0, sel: null, caret: null };
 
-/* 选区捕获：编辑模式下 mouseup/keyup 后，若选区在同一渲染段落内，
-   计算段落内文本偏移 → 存 edit.sel = { paraIdx, start, end }。
-   偏移系 = 渲染 DOM 段落内文本节点拼接序 = w:t 文档序（docx-preview 按文档序渲染，已验证）。 */
+function editActive() { return edit.active && !edit.locked; }
+
+/* 节点 → 所在可编辑段落（正文段落与表格内段落都认，按 domParas 索引） */
+function editParaFromNode(node) {
+  var el = node && node.nodeType === 3 ? node.parentElement : node;
+  while (el && el !== els.viewer) {
+    if (el.tagName === 'P' && el.parentElement &&
+        (el.parentElement.tagName === 'ARTICLE' || el.parentElement.tagName === 'TD' || el.parentElement.tagName === 'TH')) {
+      var idx = edit.domParas.indexOf(el);
+      if (idx >= 0) return { el: el, idx: idx };
+    }
+    el = el.parentElement;
+  }
+  return null;
+}
+
+/* 选区/光标在段落内的字符偏移（偏移系 = 段落内文本节点拼接序 = w:t 文档序） */
+function editOffsetInPara(pEl, node, off) {
+  var w = document.createTreeWalker(pEl, NodeFilter.SHOW_TEXT);
+  var acc = 0, n;
+  while ((n = w.nextNode())) {
+    if (n === node) return acc + off;
+    acc += n.nodeValue.length;
+  }
+  return acc;
+}
+function editCaretOffset(info) {
+  var sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return null;
+  var range = sel.getRangeAt(0);
+  return editOffsetInPara(info.el, range.startContainer, range.startOffset);
+}
+
+/* 选区捕获：mouseup/keyup 后，若选区在同一渲染段落内，
+   计算段落内文本偏移 → 存 edit.sel = { paraIdx, start, end }。 */
 function editCaptureSelection() {
   edit.sel = null;
-  if (!edit.on) return;
+  if (!editActive()) return;
   var sel = window.getSelection();
   if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
   var range = sel.getRangeAt(0);
-  var startP = range.startContainer.nodeType === 3 ? range.startContainer.parentElement : range.startContainer;
-  var endP = range.endContainer.nodeType === 3 ? range.endContainer.parentElement : range.endContainer;
-  var pEl = startP && startP.closest ? startP.closest('#viewer article > p') : null;
-  if (!pEl || !endP || (endP.closest && endP.closest('#viewer article > p') !== pEl)) return;   // 跨段/出界不管
-  var idx = edit.domParas.indexOf(pEl);
-  if (idx < 0) return;
-  function offsetIn(node, isStart) {
-    var w = document.createTreeWalker(pEl, NodeFilter.SHOW_TEXT);
-    var acc = 0, n;
-    while ((n = w.nextNode())) {
-      if (n === node) return acc + (isStart ? range.startOffset : range.endOffset);
-      acc += n.nodeValue.length;
-    }
-    return acc;
-  }
-  var s = offsetIn(range.startContainer, true);
-  var e = offsetIn(range.endContainer, false);
-  if (e <= s) { var tmp = s; s = e; e = tmp; }
-  if (e > s) edit.sel = { paraIdx: idx, start: s, end: e };
+  var si = editParaFromNode(range.startContainer);
+  var ei = editParaFromNode(range.endContainer);
+  if (!si || !ei || si.el !== ei.el) return;   // 跨段/出界不管
+  var s = editOffsetInPara(si.el, range.startContainer, range.startOffset);
+  var e = editOffsetInPara(si.el, range.endContainer, range.endOffset);
+  if (e < s) { var tmp = s; s = e; e = tmp; }
+  if (e > s) edit.sel = { paraIdx: si.idx, start: s, end: e };
 }
-/* 格式入口：有选区 → 选区命令（run 拆分）；无选区 → 段落首文字块（v0.3 行为） */
+
+/* 提示条：短暂显示后自动收起 */
+function editShowTip(msg) {
+  els.editTip.textContent = msg;
+  els.editTip.classList.add('on');
+  clearTimeout(edit._tipT);
+  edit._tipT = setTimeout(function () { els.editTip.classList.remove('on'); }, 3800);
+}
+
+/* 格式入口：有选区 → 选区命令（run 拆分）；无选区 → 焦点段落首文字块 */
 function editApplyFormat(mkRangeCmd, mkParaCmd) {
+  if (!editActive()) return;
   editSyncActive();
   try {
     if (edit.sel) {
@@ -1030,13 +1098,13 @@ function editApplyFormat(mkRangeCmd, mkParaCmd) {
 }
 
 function editSyncActive() {
-  // 强制同步当前处于编辑态的段落（保存/撤销/格式命令前的幂等兜底：
-  // 正常路径由 focusout 触发；此处兜底焦点机制失效的极端环境）
+  // 兜底同步当前焦点段落（保存/撤销/格式命令前，防焦点机制失效的极端环境）
   var p = edit.domParas && edit.activeIdx >= 0 ? edit.domParas[edit.activeIdx] : null;
   if (p && p.getAttribute('contenteditable') === 'true') {
     editSyncPara(edit.activeIdx);
   }
 }
+
 function editIsDirty() {
   return !!(edit.stack && edit.stack.size() !== edit.savedDepth);
 }
@@ -1055,65 +1123,56 @@ function editRefreshButtons() {
   edit.dirty = editIsDirty();
   els.filename.classList.toggle('dirty', edit.dirty);   // ● 由 CSS ::before 呈现（呼吸脉冲）
 }
-function toggleEdit() {
-  if (!state.buffer) { showError('请先打开一份文档再进入编辑模式。'); return; }
-  if (edit.on) { exitEdit(); return; }
-  try {
-    edit.doc = QingDuEngine.load(new Uint8Array(state.buffer));
-  } catch (e) { showError('这份文档暂不支持编辑（解析失败）：\n' + e.message); return; }
-  edit.paras = QingDuEngine.allParagraphs(edit.doc);
-  if (!editCheckAlignment()) {
-    showError('文档结构特殊（段落对齐失败），已阻止编辑以保护文件。\n阅读功能不受影响。');
-    edit.doc = null; return;
-  }
-  edit.stack = QingDuEngine.createCommandStack(edit.doc);
-  edit.on = true; edit.savedDepth = 0; edit.activeIdx = -1;
-  document.body.classList.add('editing');
-  els.editBar.classList.add('on');
-  els.editTip.classList.add('on');
-  els.btnEdit.textContent = '退出编辑';
-  edit.domParas.forEach(function (p, i) {
-    p.setAttribute('contenteditable', 'false');
-    p.addEventListener('dblclick', function () { editFocusPara(i); });
-  });
-  // focusout 冒泡（blur 不冒泡）：段落失焦即同步引擎，事件委托更可靠
-  els.viewer.addEventListener('focusout', function (e) {
-    var p = e.target;
-    if (p && p.tagName === 'P' && p.getAttribute('contenteditable') === 'true') {
-      var idx = edit.domParas.indexOf(p);
-      if (idx >= 0) editSyncPara(idx);
-    }
-  });
-  editRefreshButtons();
-}
-function exitEdit() {
-  editSyncActive();
-  if (edit.on && editIsDirty() && !window.confirm('有未保存的修改，确定退出编辑模式吗？\n（确定后将丢失未保存的改动）')) return;
-  edit.on = false;
+
+/* ---------------- 激活 / 降级 / 只读锁 ---------------- */
+function editReset() {
+  edit.active = false; edit.locked = false;
+  edit.doc = null; edit.stack = null; edit.paras = []; edit.domParas = [];
+  edit.savedDepth = 0; edit.activeIdx = -1; edit.sel = null; edit.caret = null;
   document.body.classList.remove('editing');
   els.editBar.classList.remove('on');
-  els.editTip.classList.remove('on');
-  els.btnEdit.textContent = '编辑';
   els.filename.classList.remove('dirty');
-  els.filename.textContent = state.name;
-  edit.doc = null; edit.stack = null; edit.paras = []; edit.domParas = []; edit.savedDepth = 0; edit.activeIdx = -1;
+  els.btnEdit.textContent = '编辑';
 }
-function editFocusPara(i) {
-  edit.activeIdx = i;
-  var p = edit.domParas[i];
-  p.setAttribute('contenteditable', 'true');
-  p.focus();
-  // 光标移到末尾
-  var sel = window.getSelection();
-  var range = document.createRange();
-  range.selectNodeContents(p);
-  range.collapse(false);
-  sel.removeAllRanges();
-  sel.addRange(range);
+function editDegrade(why) {
+  editReset();
+  els.btnEdit.textContent = '只读';
+  els.btnEdit.title = '本文档为纯阅读模式';
+  editShowTip('这份文档以纯阅读模式打开（' + why + '），阅读功能不受影响');
 }
+/* 文档打开成功后调用：能编则自动进入可编辑，不能编则降级纯阅读 */
+function editActivate() {
+  editReset();
+  if (!state.buffer || !state.name) return;
+  try {
+    edit.doc = QingDuEngine.load(new Uint8Array(state.buffer));
+  } catch (e) { editDegrade('引擎解析失败'); return; }
+  edit.paras = QingDuEngine.allParagraphs(edit.doc);
+  if (!editCheckAlignment()) {
+    editDegrade('段落对齐失败，已阻止编辑以保护文件');
+    return;
+  }
+  edit.stack = QingDuEngine.createCommandStack(edit.doc);
+  edit.active = true; edit.locked = false;
+  editApplyLock();
+  editShowTip('单击段落即可编辑 · Enter 分段 · Ctrl+S 保存');
+  editRefreshButtons();
+}
+/* 应用只读锁状态到 DOM 与界面 */
+function editApplyLock() {
+  var on = editActive();
+  document.body.classList.toggle('editing', on);
+  els.editBar.classList.toggle('on', on);
+  els.btnEdit.textContent = on ? '只读' : '编辑';
+  els.btnEdit.title = on ? '锁定为纯阅读' : (edit.active ? '解锁编辑' : '本文档为纯阅读模式');
+  edit.domParas.forEach(function (p) {
+    p.setAttribute('contenteditable', on ? 'true' : 'false');
+  });
+}
+
 function editSyncPara(i) {
   var p = edit.domParas[i];
-  p.setAttribute('contenteditable', 'false');
+  if (!p) return;
   var domText = (p.textContent || '');
   var treeText = QingDuEngine.getParaText(edit.paras[i]);
   if (domText !== treeText) {
@@ -1126,28 +1185,76 @@ function editSyncPara(i) {
     }
   }
 }
-/* 引擎命令后统一走这里：树已改 → 更新 buffer → 全量重绘（保持滚动） */
-function editAfterCommand() {
+
+/* 引擎命令后统一走这里：树已改 → 更新 buffer → 全量重绘（保持滚动与光标） */
+function editAfterCommand(caret) {
   edit.sel = null;                                     // DOM 重绘，选区偏移失效
   var bytes = QingDuEngine.serialize(edit.doc);
   state.buffer = bytes.buffer;
   var scrollY = els.stage.scrollTop;
+  edit.caret = caret || null;
   renderCurrent().then(function () {
     els.stage.scrollTop = scrollY;
-    if (edit.on) {
-      // 重绘后 DOM 段落引用全部失效：重建索引与事件（focusout 委托在 viewer 上，无需重挂）
-      if (!editCheckAlignment()) { exitEdit(); return; }
-      edit.domParas.forEach(function (p, i) {
-        p.setAttribute('contenteditable', 'false');
-        p.addEventListener('dblclick', function () { editFocusPara(i); });
-      });
-    }
+    if (!edit.active) return;
+    edit.paras = QingDuEngine.allParagraphs(edit.doc);  // 分段/合并会改变段落集合
+    if (!editCheckAlignment()) { editDegrade('重绘后段落对齐失败'); return; }
+    editApplyLock();
     editRefreshButtons();
+    if (edit.caret) editRestoreCaret(edit.caret.idx, edit.caret.offset);
   });
 }
+
+/* 重绘后按 { idx, offset } 恢复光标（找不到对应文本节点则落到段尾） */
+function editRestoreCaret(idx, offset) {
+  var p = edit.domParas[idx];
+  if (!p) return;
+  edit.activeIdx = idx;
+  p.focus();
+  var sel = window.getSelection();
+  var range = document.createRange();
+  var w = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
+  var acc = 0, n;
+  while ((n = w.nextNode())) {
+    if (acc + n.nodeValue.length >= offset) {
+      range.setStart(n, Math.max(0, offset - acc));
+      range.collapse(true);
+      sel.removeAllRanges(); sel.addRange(range);
+      return;
+    }
+    acc += n.nodeValue.length;
+  }
+  range.selectNodeContents(p);
+  range.collapse(false);
+  sel.removeAllRanges(); sel.addRange(range);
+}
+
+/* Enter：先同步本段 DOM 差异，再在光标处分段；光标落新段开头 */
+function editHandleEnter(info) {
+  var off = editCaretOffset(info);
+  if (off === null) return;
+  editSyncPara(info.idx);
+  try {
+    edit.stack.execute(QingDuEngine.SplitParagraphCmd(edit.paras[info.idx], off));
+  } catch (e) { showError('分段失败：' + e.message); return; }
+  editAfterCommand({ idx: info.idx + 1, offset: 0 });
+}
+
+/* 段首退格：并入文档序上一段（须为真正的元素兄弟相邻）；光标落拼接处 */
+function editHandleMerge(info) {
+  if (info.idx === 0) return;
+  var cur = edit.paras[info.idx], prev = edit.paras[info.idx - 1];
+  if (!cur || !prev || cur.previousElementSibling !== prev) return;   // 跨单元格/表格边界不合并
+  editSyncPara(info.idx);
+  var caretOff = QingDuEngine.getParaText(prev).length;
+  try {
+    edit.stack.execute(QingDuEngine.MergeWithPrevCmd(cur));
+  } catch (e) { showError('合并失败：' + e.message); return; }
+  editAfterCommand({ idx: info.idx - 1, offset: caretOff });
+}
+
 function editCmdActivePara() {
   if (edit.activeIdx < 0 || !edit.paras[edit.activeIdx]) {
-    showError('请先双击一个段落进入编辑，再使用格式按钮。');
+    showError('请先单击进入一个段落，再使用格式按钮。');
     return null;
   }
   return edit.paras[edit.activeIdx];
@@ -1160,7 +1267,39 @@ function editFirstRun(p) {
   }
   return runs[0] || null;
 }
-els.btnEdit.addEventListener('click', toggleEdit);
+/* ---------------- 事件接线（全部委托在 viewer 上，重绘后无需重挂） ---------------- */
+els.btnEdit.addEventListener('click', function () {
+  if (!edit.active) { showError('这份文档以纯阅读模式打开（结构特殊，暂不支持安全编辑）。'); return; }
+  if (edit.locked) { edit.locked = false; }
+  else { editSyncActive(); edit.locked = true; }      // 锁定前把活动段同步进引擎
+  editApplyLock();
+});
+els.viewer.addEventListener('focusin', function (e) {
+  var info = editParaFromNode(e.target);
+  if (info) edit.activeIdx = info.idx;
+});
+/* focusout 冒泡（blur 不冒泡）：段落失焦即同步引擎 */
+els.viewer.addEventListener('focusout', function (e) {
+  var info = editParaFromNode(e.target);
+  if (info) editSyncPara(info.idx);
+});
+/* Enter 分段 / 段首退格合并（输入法合成中不拦截，交给原生行为） */
+els.viewer.addEventListener('keydown', function (e) {
+  if (!editActive()) return;
+  var info = editParaFromNode(e.target);
+  if (!info) return;
+  var ime = e.isComposing || e.keyCode === 229;
+  if (e.key === 'Enter' && !ime) {
+    e.preventDefault();
+    editHandleEnter(info);
+  } else if (e.key === 'Backspace' && !ime) {
+    var sel = window.getSelection();
+    if (sel && sel.isCollapsed && editCaretOffset(info) === 0) {
+      e.preventDefault();
+      editHandleMerge(info);
+    }
+  }
+});
 ['e-bold', 'e-italic', 'e-fontsize', 'e-color'].forEach(function (id) {
   document.getElementById(id).addEventListener('mousedown', function (e) {
     e.preventDefault();                       // 阻止按钮抢焦点 → 选区保留
@@ -1193,7 +1332,7 @@ els.eUndo.addEventListener('click', function () { editSyncActive(); if (edit.sta
 els.eRedo.addEventListener('click', function () { editSyncActive(); if (edit.stack && edit.stack.redo()) editAfterCommand(); });
 
 function editSave() {
-  if (!edit.on) return;
+  if (!edit.active) return;
   editSyncActive();                                    // 兜底：确保活动段已入引擎
   if (!editIsDirty()) { showError('没有需要保存的修改。'); return; }
   var bytes = new Uint8Array(QingDuEngine.serialize(edit.doc));
@@ -1233,17 +1372,19 @@ function upLogSafe(msg) {
   else console.log(msg);
 }
 
-/* 编辑快捷键（并入全局 keydown 链） */
+/* 编辑快捷键（并入全局 keydown 链；段落内编辑时 Ctrl+Z 走浏览器原生撤销） */
 window.addEventListener('keydown', function (e) {
-  if (!edit.on) return;
+  if (!edit.active) return;
   if (e.ctrlKey && e.key.toLowerCase() === 's') { e.preventDefault(); editSave(); }
   else if (e.ctrlKey && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+    if (!editActive()) return;
     editSyncActive();
     e.preventDefault();
     var ae = document.activeElement;
     if (!(ae && ae.getAttribute('contenteditable') === 'true') && edit.stack && edit.stack.undo()) editAfterCommand();
   }
   else if ((e.ctrlKey && e.key.toLowerCase() === 'y') || (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'z')) {
+    if (!editActive()) return;
     e.preventDefault();
     editSyncActive();
     var ae2 = document.activeElement;
@@ -1251,13 +1392,18 @@ window.addEventListener('keydown', function (e) {
   }
 });
 
-/* 打开新文档 / 回首页时：退出编辑模式并清空引擎状态 */
+/* 打开新文档：有未保存修改先确认；渲染完成后自动进入可编辑（editActivate） */
 (function () {
   var origOpenBytes = openBytes;
   openBytes = function (bytes, name) {
-    if (edit.on) { edit.on = false; document.body.classList.remove('editing'); els.editBar.classList.remove('on'); els.editTip.classList.remove('on'); els.btnEdit.textContent = '编辑'; }
-    edit.doc = null; edit.stack = null; edit.paras = []; edit.domParas = []; edit.savedDepth = 0; edit.activeIdx = -1;
-    return origOpenBytes(bytes, name);
+    if (edit.active && editIsDirty() &&
+        !window.confirm('当前文档有未保存的修改，打开新文档将丢失，继续吗？')) {
+      return Promise.resolve();
+    }
+    editReset();
+    return origOpenBytes(bytes, name).then(function () {
+      editActivate();          // 渲染完成（DOM 段落已就位）后自动接管编辑
+    });
   };
 })();
 

@@ -1,12 +1,29 @@
 // 轻读 — Tauri 原生壳
-// 命令：按路径读取文档、写回原文件（自动 .bak）、检查更新、执行更新
+// 命令：按路径读取文档、写回原文件（自动 .bak）、检查更新、执行更新、取关联启动路径
 //
 // 更新安全模型（借鉴 Tauri 官方更新器"更新器是最高价值攻击面"的原则，
 // 采用其弱化版：URL 由 Rust 侧硬编码构造（不信任前端），安装包经
 // SHA-256 清单校验（清单与安装包同源自 Release 下载）；后续可升级
 // 为 minisign 签名校验。
+//
+// 插件：
+//   · single-instance（必须第一个注册）——已在运行时再启动只把 argv 转发给
+//     已开实例并聚焦（双击 .docx / 右键打开方式 / QQ 转发的标准行为）
+//   · dialog ——系统原生文件对话框，前端拿真实绝对路径（最近列表/原位保存依赖它）
+
+use tauri::{Emitter, Manager};
 
 const UPDATE_BASE: &str = "https://github.com/qcccqq/qingdu/releases/latest/download";
+
+/// 关联启动（文件关联/命令行）暂存的文档路径：前端就绪后用 get_pending_doc 拉取。
+/// 拉模式取代旧版"启动 900ms 后推事件"——那会在页面未加载完时丢事件（竞态）。
+struct PendingOpen(std::sync::Mutex<Option<String>>);
+
+/// 取出关联启动带来的 .docx 路径（取后即清，只消费一次）
+#[tauri::command]
+fn get_pending_doc(state: tauri::State<PendingOpen>) -> Option<String> {
+    state.0.lock().map(|mut g| g.take()).unwrap_or(None)
+}
 
 /// 按路径读取文件（用于双击 .docx 关联打开、最近文件重开）
 #[tauri::command]
@@ -87,7 +104,6 @@ fn check_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
 #[tauri::command(async)]
 fn perform_update(app: tauri::AppHandle) -> Result<(), String> {
     use std::io::Read as _;
-    use tauri::Emitter;
     let emit = |stage: &str, detail: &str| -> () {
         let _ = app.emit("update-log", format!("{}|{}", stage, detail));
     };
@@ -155,27 +171,34 @@ fn perform_update(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // 第二实例启动（如已在运行时又双击了 .docx）：转发路径 + 聚焦已有窗口
+            if let Some(path) = argv.iter().skip(1).find(|a| {
+                a.to_lowercase().ends_with(".docx") && std::path::Path::new(a).exists()
+            }) {
+                let _ = app.emit("open-file", path.clone());
+            }
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // 双击 .docx 关联启动时，Windows 会把文件路径作为命令行参数传入；
-            // 等界面就绪后把路径发给前端。
+            // 关联启动：Windows 把文件路径作为命令行参数传入。暂存到应用状态，
+            // 前端加载完毕后经 get_pending_doc 主动拉取（无竞态）。
             let doc_path: Option<String> = std::env::args().skip(1).find(|a| {
                 a.to_lowercase().ends_with(".docx") && std::path::Path::new(a).exists()
             });
-            if let Some(p) = doc_path {
-                let handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(900));
-                    use tauri::Emitter;
-                    let _ = handle.emit("open-file", p);
-                });
-            }
+            app.manage(PendingOpen(std::sync::Mutex::new(doc_path)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             read_file_by_path,
             write_file_with_backup,
             check_update,
-            perform_update
+            perform_update,
+            get_pending_doc
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
