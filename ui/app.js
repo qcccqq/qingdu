@@ -541,6 +541,17 @@ function parseDocExtras() {
         state.pgMar.bottom = twPx('bottom', state.pgMar.bottom);
       }
     }
+    // 3b) 文档网格（中文版 Word/WPS 默认行对齐网格线，docx-preview 忽略；
+    //     表格行高补真需要它作最小行高）
+    state.docGrid = 0;
+    var dg = sectPr ? sectPr.getElementsByTagName('w:docGrid')[0] : null;
+    if (dg) {
+      var type = dg.getAttribute('w:type') || '';
+      var lp = parseFloat(dg.getAttribute('w:linePitch'));
+      if ((type === 'lines' || type === 'linesAndChars') && isFinite(lp) && lp > 0) {
+        state.docGrid = lp / 15;   // twips → px
+      }
+    }
     // 4) 页眉锚定图片（水印/图章）几何：按 wp:anchor 语义记录，
     //    渲染后由 fixHeaderWatermarks 精确摆放（对齐 Word/WPS）
     state.headerAnchors = [];
@@ -635,9 +646,49 @@ function enhanceWhenReady() {
   });
 }
 
+/* ============ 表格行高补真：docx-preview 不渲染 w:trHeight ============
+   行被压成内容高（比 Word/WPS 矮 20-35%），表格提前收尾、页尾留白，
+   页眉锚定水印会悬进空白里显得"出表格"。
+   分页前按 body 子元素 ↔ 各节 article 子元素的文档序 1:1 对应，把每行的
+   trHeight 写到渲染行的 style.height（tr 的 CSS height 本就是"最小高"，
+   恰好是 w:hRule="atLeast" 的语义；"exact" 在 v1 同样按最小高处理）。 */
+function applyTableRowHeights() {
+  if (!state.buffer) return;
+  try {
+    var zip = fflate.unzipSync(new Uint8Array(state.buffer));
+    var dec = new TextDecoder();
+    var doc = new DOMParser().parseFromString(dec.decode(zip['word/document.xml']), 'application/xml');
+    var body = doc.getElementsByTagName('w:body')[0];
+    if (!body) return;
+    // 只按"表格出现顺序"对齐（第 N 张源表 = 第 N 张渲染表）：
+    // 与段落级子元素序解耦，docx-preview 渲染层的杂项节点不会造成错位。
+    // 注意层级：#viewer > .docx-wrapper > section.docx > article（section 不是 viewer 直接子元素）
+    var srcTables = [].filter.call(body.children, function (c) { return c.tagName === 'w:tbl'; });
+    var dstTables = [];
+    els.viewer.querySelectorAll('section.docx > article').forEach(function (a) {
+      [].forEach.call(a.children, function (c) { if (c.tagName === 'TABLE') dstTables.push(c); });
+    });
+    for (var i = 0; i < srcTables.length && i < dstTables.length; i++) {
+      var srcRows = [].filter.call(srcTables[i].children, function (c) { return c.tagName === 'w:tr'; });
+      var dstRows = dstTables[i].rows;
+      for (var j = 0; j < srcRows.length && j < dstRows.length; j++) {
+        // 行高 = max(文档网格线, trHeight atLeast)；网格是中文文档行高的隐形下限
+        var h = state.docGrid || 0;
+        var trh = srcRows[j].getElementsByTagName('w:trHeight')[0];
+        if (trh) {
+          var v = parseFloat(trh.getAttribute('w:val'));
+          if (isFinite(v) && v > 0) h = Math.max(h, v / 15);
+        }
+        if (h > 0) dstRows[j].style.height = h + 'px';
+      }
+    }
+  } catch (e) { /* 行高补真失败不影响阅读 */ }
+}
+
 function enhanceNow() {
   fixHeaderWatermarks();
   fixVmlTextboxes();
+  applyTableRowHeights();
   paginateAll();
   renderFloatingAnchors();
   fixPageFields();
@@ -868,8 +919,9 @@ function renderFloatingAnchors() {
     var body = doc.getElementsByTagName('w:body')[0];
     if (!body) return;
     // body 直接子元素序号 ↔ 渲染层各节 article 子元素的拼接顺序一一对应（已实测验证）
+    // （层级：#viewer > .docx-wrapper > section.docx > article）
     var allArtKids = [];
-    els.viewer.querySelectorAll(':scope > section.docx').forEach(function (s) {
+    els.viewer.querySelectorAll('section.docx').forEach(function (s) {
       var a = s.querySelector(':scope > article');
       if (a) [].forEach.call(a.children, function (c) { allArtKids.push(c); });
     });
