@@ -524,6 +524,55 @@ function parseDocExtras() {
         if (hdr) state.tableHeaderRows[tblOrd] = hdr;
       }
     });
+    // 3) 页面边距（页眉锚定水印的定位基准；twips→px ÷15，96dpi）
+    state.pgMar = { header: 48, top: 96, left: 96, right: 96, bottom: 96 };
+    var sectPr = doc.getElementsByTagName('w:sectPr')[0];
+    if (sectPr) {
+      var pm = sectPr.getElementsByTagName('w:pgMar')[0];
+      if (pm) {
+        var twPx = function (n, dft) {
+          var v = parseInt(pm.getAttribute('w:' + n), 10);   // XML 属性带命名空间前缀
+          return isFinite(v) && v > 0 ? v / 15 : dft;
+        };
+        state.pgMar.header = twPx('header', state.pgMar.header);
+        state.pgMar.top = twPx('top', state.pgMar.top);
+        state.pgMar.left = twPx('left', state.pgMar.left);
+        state.pgMar.right = twPx('right', state.pgMar.right);
+        state.pgMar.bottom = twPx('bottom', state.pgMar.bottom);
+      }
+    }
+    // 4) 页眉锚定图片（水印/图章）几何：按 wp:anchor 语义记录，
+    //    渲染后由 fixHeaderWatermarks 精确摆放（对齐 Word/WPS）
+    state.headerAnchors = [];
+    Object.keys(zip).forEach(function (key) {
+      if (!/^word\/header\d+\.xml$/.test(key)) return;
+      var hd = new DOMParser().parseFromString(dec.decode(zip[key]), 'application/xml');
+      [].forEach.call(hd.getElementsByTagName('wp:anchor'), function (an) {
+        var ext = an.getElementsByTagName('wp:extent')[0];
+        if (!ext) return;
+        var readPos = function (tag) {
+          var p = an.getElementsByTagName(tag)[0];
+          if (!p) return { rel: 'margin', off: 0, align: null };
+          var offEl = p.getElementsByTagName('wp:posOffset')[0];
+          var alEl = p.getElementsByTagName('wp:align')[0];
+          return {
+            rel: p.getAttribute('relativeFrom') || 'margin',
+            off: offEl ? (parseInt(offEl.textContent, 10) || 0) / 9525 : 0,   // EMU→px
+            align: alEl ? (alEl.textContent || '').trim() : null
+          };
+        };
+        var sr = an.getElementsByTagName('a:srcRect')[0];
+        var pct = function (n) { return sr ? (parseFloat(sr.getAttribute(n)) || 0) / 100 : 0; };
+        state.headerAnchors.push({
+          w: (parseInt(ext.getAttribute('cx'), 10) || 0) / 9525,
+          h: (parseInt(ext.getAttribute('cy'), 10) || 0) / 9525,
+          x: readPos('wp:positionH'),
+          y: readPos('wp:positionV'),
+          behind: an.getAttribute('behindDoc') === '1',
+          crop: { l: pct('l'), t: pct('t'), r: pct('r'), b: pct('b') }
+        });
+      });
+    });
   } catch (e) { /* 解析失败不影响阅读 */ }
 }
 
@@ -599,20 +648,76 @@ window.addEventListener('resize', function () {
 });
 
 function fixHeaderWatermarks() {
+  var anchors = state.headerAnchors || [];
+  var pgMar = state.pgMar || { header: 48, top: 96, left: 96, right: 96, bottom: 96 };
   document.querySelectorAll('#viewer section.docx').forEach(function (sec) {
     // 层级修正：正文必须在页眉水印/页脚之上（docx 默认样式给了 z-index 却没给定位，等于没生效）
     var artAll = sec.querySelector(':scope > article');
     if (artAll) { artAll.style.position = 'relative'; artAll.style.zIndex = '1'; }
     sec.querySelectorAll(':scope > header').forEach(function (h) {
-      var big = h.querySelector('img');
-      // 用 naturalWidth 判断（不依赖图片是否已完成布局），≥300px 视为水印/大图页眉
-      if (!big || Math.max(big.naturalWidth || 0, big.offsetWidth || 0) < 300) return;
+      var bigs = [].filter.call(h.querySelectorAll('img'), function (im) {
+        // 用 naturalWidth 判断（不依赖图片是否已完成布局），≥300px 视为水印/大图页眉
+        return Math.max(im.naturalWidth || 0, im.offsetWidth || 0) >= 300;
+      });
+      if (!bigs.length) return;
       h.style.position = 'absolute';
       h.style.top = '0'; h.style.left = '0'; h.style.right = '0';
       h.style.zIndex = '0'; h.style.pointerEvents = 'none';
-      big.style.display = 'block';
-      big.style.margin = '0 auto';                        // 水印水平居中
-      big.style.maxWidth = 'none';
+      var csSec = getComputedStyle(sec);
+      var pageW = sec.clientWidth, pageH = sec.clientHeight;
+      var mL = parseFloat(csSec.paddingLeft) || pgMar.left;
+      var mR = parseFloat(csSec.paddingRight) || pgMar.right;
+      var mT = parseFloat(csSec.paddingTop) || pgMar.top;
+      var mB = parseFloat(csSec.paddingBottom) || pgMar.bottom;
+      bigs.forEach(function (im) {
+        // 渲染尺寸 ↔ 页眉锚点几何匹配（docx-preview 按 extent 出图，±2px 容差）
+        var a = null, i;
+        for (i = 0; i < anchors.length; i++) {
+          if (Math.abs(anchors[i].w - im.offsetWidth) <= 2 &&
+              Math.abs(anchors[i].h - im.offsetHeight) <= 2) { a = anchors[i]; break; }
+        }
+        if (!a) {
+          // 无锚点信息（内联大图）：维持居中兜底
+          im.style.display = 'block';
+          im.style.margin = '0 auto';
+          im.style.maxWidth = 'none';
+          return;
+        }
+        // OOXML 锚点语义定位（对齐 Word/WPS）：
+        // H：page=页左上原点；margin/column=页边距 + 偏移；align=center=相对基准居中
+        var x;
+        if (a.x.align === 'center') x = mL + (pageW - mL - mR - a.w) / 2;
+        else if (a.x.rel === 'page') x = a.x.off;
+        else x = mL + a.x.off;
+        // V：paragraph=页眉锚段落顶（=页眉距）+ 偏移；margin=上边距 + 偏移
+        var y;
+        if (a.y.align === 'center') y = mT + (pageH - mT - mB - a.h) / 2;
+        else if (a.y.rel === 'page') y = a.y.off;
+        else if (a.y.rel === 'paragraph') y = pgMar.header + a.y.off;
+        else y = mT + a.y.off;
+        // 裁剪容器：extent 框 + overflow hidden（srcRect 裁掉边缘后拉伸填满框）
+        var wrap = document.createElement('span');
+        wrap.style.cssText = 'position:absolute;overflow:hidden;pointer-events:none;';
+        wrap.style.left = Math.round(x) + 'px';
+        wrap.style.top = Math.round(y) + 'px';
+        wrap.style.width = a.w + 'px';
+        wrap.style.height = a.h + 'px';
+        wrap.style.zIndex = a.behind ? '0' : '2';
+        var visW = 1 - a.crop.l - a.crop.r, visH = 1 - a.crop.t - a.crop.b;
+        if (visW > 0 && visH > 0 && (visW < 1 || visH < 1)) {
+          im.style.width = (a.w / visW) + 'px';
+          im.style.height = (a.h / visH) + 'px';
+          im.style.marginLeft = -(a.w * a.crop.l / visW) + 'px';
+          im.style.marginTop = -(a.h * a.crop.t / visH) + 'px';
+        } else {
+          im.style.width = a.w + 'px';
+          im.style.height = a.h + 'px';
+        }
+        im.style.maxWidth = 'none';
+        im.style.display = 'block';
+        wrap.appendChild(im);
+        h.appendChild(wrap);
+      });
     });
     var art = sec.querySelector(':scope > article');
     if (!art) return;
