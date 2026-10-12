@@ -562,7 +562,16 @@ function parseDocExtras() {
           };
         };
         var sr = an.getElementsByTagName('a:srcRect')[0];
-        var pct = function (n) { return sr ? (parseFloat(sr.getAttribute(n)) || 0) / 100 : 0; };
+        // ST_Percentage（ECMA-376）：整数 = 千分之一百分点（100000=100%，18=0.018%）；
+        // 兼容带 % 的字符串形式（"18%"=18%）
+        var pct = function (n) {
+          if (!sr) return 0;
+          var raw = (sr.getAttribute(n) || '').trim();
+          if (!raw) return 0;
+          if (raw.charAt(raw.length - 1) === '%') return (parseFloat(raw) || 0) / 100;
+          var v = parseFloat(raw);
+          return isFinite(v) ? v / 100000 : 0;
+        };
         state.headerAnchors.push({
           w: (parseInt(ext.getAttribute('cx'), 10) || 0) / 9525,
           h: (parseInt(ext.getAttribute('cy'), 10) || 0) / 9525,
