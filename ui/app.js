@@ -64,6 +64,16 @@ var zoom = 1;
 var hits = [], hitIdx = -1, lastQuery = '';
 var scrollPending = false;
 
+/* zip 条目共享缓存：一次解压全局复用（parseDocExtras/行高/排版/浮动图四处都要读），
+   按 buffer 引用失效（编辑写回后 buffer 换新引用自然重解） */
+function getZipEntries() {
+  if (!state.buffer) return null;
+  if (!state.zipCache || state.zipCache.buf !== state.buffer) {
+    state.zipCache = { buf: state.buffer, entries: fflate.unzipSync(new Uint8Array(state.buffer)) };
+  }
+  return state.zipCache.entries;
+}
+
 /* ================= 最近文件 ================= */
 function lsGetRecents() {
   try { return JSON.parse(localStorage.getItem('qdu-recents') || '[]'); }
@@ -482,7 +492,8 @@ function parseDocExtras() {
   state.fieldInfo = { header: [], footer: [] };
   state.tableHeaderRows = {};
   try {
-    var zip = fflate.unzipSync(new Uint8Array(state.buffer));
+    var zip = getZipEntries();
+    if (!zip) return;
     var dec = new TextDecoder();
     // 1) 页眉/页脚里的 PAGE / NUMPAGES 字段（按出现顺序，含缓存值）
     ['header', 'footer'].forEach(function (part) {
@@ -522,6 +533,22 @@ function parseDocExtras() {
           return tr.getElementsByTagName('w:tblHeader').length > 0;
         }).length;
         if (hdr) state.tableHeaderRows[tblOrd] = hdr;
+      }
+    });
+    // 2b) 段落 CJK 首行缩进（w:ind firstLineChars，百分之一字符，docx-preview 只认 twips）
+    state.typoBody = [];
+    [].forEach.call(body.children, function (c) {
+      if (c.tagName === 'w:sectPr') return;
+      if (c.tagName === 'w:p') {
+        var ind = c.getElementsByTagName('w:ind')[0];
+        var flc = ind ? parseInt(ind.getAttribute('w:firstLineChars'), 10) : 0;
+        state.typoBody.push(isFinite(flc) && flc > 0 ? flc : 0);
+      } else {
+        [].forEach.call(c.getElementsByTagName('w:p'), function (p2) {
+          var ind2 = p2.getElementsByTagName('w:ind')[0];
+          var flc2 = ind2 ? parseInt(ind2.getAttribute('w:firstLineChars'), 10) : 0;
+          state.typoBody.push(isFinite(flc2) && flc2 > 0 ? flc2 : 0);
+        });
       }
     });
     // 3) 页面边距（页眉锚定水印的定位基准；twips→px ÷15，96dpi）
@@ -655,7 +682,8 @@ function enhanceWhenReady() {
 function applyTableRowHeights() {
   if (!state.buffer) return;
   try {
-    var zip = fflate.unzipSync(new Uint8Array(state.buffer));
+    var zip = getZipEntries();
+    if (!zip) return;
     var dec = new TextDecoder();
     var doc = new DOMParser().parseFromString(dec.decode(zip['word/document.xml']), 'application/xml');
     var body = doc.getElementsByTagName('w:body')[0];
@@ -692,9 +720,171 @@ function applyTableRowHeights() {
   } catch (e) { /* 行高补真失败不影响阅读 */ }
 }
 
+/* ============ 字体与排版增强 ============
+   依据（MS-OE376 rFonts 四槽模型 + 业界回退字体实践）：
+   · run 的字体分 ascii/hAnsi/eastAsia/cs 四槽；Web 标准映射 = font-family 链
+     "拉丁字体在前、CJK 字体在后"，浏览器按字形覆盖逐字取用（正则字形→ascii 槽字体，
+     汉字→eastAsia 槽字体）；
+   · 字体缺失时必须有回退链（Syncfusion fallback-font 同思路）——
+     华文中宋/仿宋_GB2312/方正系列等非系统常装字体一旦缺失，裸名会逐字掉进
+     浏览器默认字体，呈现"同一行里字体忽变"的脏效果；
+   · 无 rFonts 的 run 应落文档默认（宋体/等线系），而不是应用 UI 字体。 */
+var FONT_ALIAS = {
+  '宋体': "'宋体','SimSun','NSimSun','STSong','serif'",
+  'simsun': "'SimSun','宋体','NSimSun','STSong','serif'",
+  'nsimsun': "'NSimSun','新宋体','宋体','SimSun','serif'",
+  '新宋体': "'新宋体','NSimSun','宋体','SimSun','serif'",
+  '黑体': "'黑体','SimHei','Heiti SC','Microsoft YaHei','sans-serif'",
+  '仿宋': "'仿宋','仿宋_GB2312','FangSong','FangSong_GB2312','STFangsong','FangSong SC','宋体','SimSun','serif'",
+  '仿宋_gb2312': "'仿宋_GB2312','仿宋','FangSong_GB2312','FangSong','STFangsong','宋体','SimSun','serif'",
+  '楷体': "'楷体','楷体_GB2312','KaiTi','KaiTi_GB2312','STKaiti','Kaiti SC','楷体','serif'",
+  '楷体_gb2312': "'楷体_GB2312','楷体','KaiTi_GB2312','KaiTi','STKaiti','serif'",
+  '隶书': "'隶书','LiSu','SimLi','STLiti','serif'",
+  '幼圆': "'幼圆','YouYuan','STYouYuan','Microsoft YaHei','sans-serif'",
+  '华文中宋': "'华文中宋','STZhongsong','宋体','SimSun','serif'",
+  'stzhongsong': "'华文中宋','STZhongsong','宋体','SimSun','serif'",
+  '华文行楷': "'华文行楷','STXingkai','楷体','KaiTi','serif'",
+  '华文隶书': "'华文隶书','STLiti','隶书','SimLi','serif'",
+  '华文新魏': "'华文新魏','STXinwei','serif'",
+  '华文琥珀': "'华文琥珀','STHupo','黑体','sans-serif'",
+  '华文彩云': "'华文彩云','STCaiyun','serif'",
+  '方正小标宋简体': "'方正小标宋简体','FZXiaoBiaoSong-B05S','方正小标宋_GBK','宋体','serif'",
+  '方正小标宋_gbk': "'方正小标宋_GBK','FZXiaoBiaoSong-B05S','宋体','SimSun','serif'",
+  '方正仿宋_gbk': "'方正仿宋_GBK','FZFangSong-Z02S','仿宋','FangSong','宋体','serif'",
+  '方正黑体_gbk': "'方正黑体_GBK','FZHei-B01S','黑体','SimHei','sans-serif'",
+  '方正楷体_gbk': "'方正楷体_GBK','FZKai-Z03S','楷体','KaiTi','serif'",
+  '方正书宋_gbk': "'方正书宋_GBK','FZShuSong-Z02S','宋体','SimSun','serif'",
+  '微软雅黑': "'微软雅黑','Microsoft YaHei','PingFang SC','Hiragino Sans GB','sans-serif'",
+  '等线': "'等线','DengXian','Microsoft YaHei','sans-serif'",
+  '等线 light': "'等线 Light','DengXian Light','等线','DengXian','Microsoft YaHei','sans-serif'",
+  'times new roman': "'Times New Roman','Times','Liberation Serif','serif'",
+  'calibri': "'Calibri','Carlito','Segoe UI','sans-serif'",
+  'cambria': "'Cambria','Caladea','Georgia','serif'",
+  'georgia': "'Georgia','serif'",
+  'arial': "'Arial','Helvetica','Liberation Sans','sans-serif'",
+  'segoe ui': "'Segoe UI','sans-serif'",
+  'consolas': "'Consolas','Courier New','monospace'",
+  'cambria math': "'Cambria Math','Cambria','serif'"
+};
+var SERIF_HINT = /宋|仿|楷|隶|篆|书宋|小标宋|serif|times|georgia|garamond|cambria|mincho|song/i;
+var GENERIC_FONT = /^(serif|sans-serif|monospace|cursive|fantasy|system-ui|ui-serif|ui-sans-serif|ui-monospace)$/;
+
+/* 合并字体链：名字保序去重，通用关键字统一挪到末尾
+   （CSS 里 serif 等关键字会"兜住"一切字形，出现在中间会让其后字体全部不可达） */
+function expandFontChain(familyStr) {
+  if (!familyStr) return '';
+  var names = [], seen = {}, generic = null;
+  function pushChain(chain) {
+    chain.split(',').forEach(function (f) {
+      var t = f.trim().replace(/^['"]+|['"]+$/g, '');   // 去引号后再判别（链里 token 带引号）
+      if (!t) return;
+      if (GENERIC_FONT.test(t)) { if (!generic) generic = t; return; }
+      if (!seen[t]) { seen[t] = 1; names.push("'" + t + "'"); }
+    });
+  }
+  String(familyStr).split(',').forEach(function (pRaw) {
+    var name = pRaw.trim().replace(/^['"]+|['"]+$/g, '');
+    if (!name) return;
+    var key = name.toLowerCase();
+    if (FONT_ALIAS[key]) pushChain(FONT_ALIAS[key]);
+    else if (/^(var|inherit|initial|unset|revert)/i.test(name)) return;
+    else pushChain("'" + name + "'," + (SERIF_HINT.test(name) ? "'宋体','SimSun',serif" : "'Microsoft YaHei',sans-serif"));
+  });
+  return names.join(',') + (generic ? ',' + generic : '');
+}
+
+function applyTypography() {
+  if (!state.buffer) return;
+  try {
+    var zip = getZipEntries();
+    if (!zip) return;
+    var dec = new TextDecoder();
+    var defaultChain = "'Times New Roman','宋体','SimSun','serif'";   // 中文办公文档经典默认
+    var themeNames = [];
+    // 1) 文档默认字体：styles.xml docDefaults rPr/rFonts + theme1.xml 字体方案
+    if (zip['word/styles.xml']) {
+      var sd = new DOMParser().parseFromString(dec.decode(zip['word/styles.xml']), 'application/xml');
+      var ddRf = sd.getElementsByTagName('w:docDefaults')[0];
+      ddRf = ddRf ? ddRf.getElementsByTagName('w:rFonts')[0] : null;
+      if (ddRf) {
+        var chain = [];
+        ['w:ascii', 'w:hAnsi', 'w:eastAsia'].forEach(function (a) {
+          var v = ddRf.getAttribute(a);
+          if (v) chain.push(v);
+        });
+        if (chain.length) defaultChain = chain.join(',');
+      }
+    }
+    if (zip['word/theme/theme1.xml']) {
+      var td = new DOMParser().parseFromString(dec.decode(zip['word/theme/theme1.xml']), 'application/xml');
+      ['majorFont', 'minorFont'].forEach(function (fn) {
+        var f = td.getElementsByTagName('a:' + fn)[0];
+        if (!f) return;
+        var latin = f.getElementsByTagName('a:latin')[0];
+        var ea = f.getElementsByTagName('a:ea')[0];
+        var hans = null;
+        [].forEach.call(f.getElementsByTagName('a:font'), function (s) {
+          if (s.getAttribute('script') === 'Hans') hans = s;
+        });
+        var lat = latin ? latin.getAttribute('typeface') : '';
+        var eav = (ea && ea.getAttribute('typeface')) || (hans ? hans.getAttribute('typeface') : '');
+        if (lat) themeNames.push(lat);
+        if (eav) themeNames.push(eav);
+        // 主题槽（如 minorHAnsi）渲染出的链只有 Latin 名——动态补 eastAsia 伙伴
+        if (lat) {
+          FONT_ALIAS[lat.toLowerCase()] = "'" + lat + "'" + (eav ? ",'" + eav + "'" : '') +
+            (SERIF_HINT.test(lat + eav) ? ",'宋体','SimSun','serif'" : ",'Microsoft YaHei','sans-serif'");
+        }
+      });
+      // 主题里声明过的 eastAsia 名也进别名表（等线/宋体系缺失时回退）
+      themeNames.forEach(function (n) {
+        if (!FONT_ALIAS[n.toLowerCase()]) {
+          FONT_ALIAS[n.toLowerCase()] = "'" + n + "'," +
+            (SERIF_HINT.test(n) ? "'宋体','SimSun','serif'" : "'Microsoft YaHei','sans-serif'");
+        }
+      });
+    }
+    var defChain = expandFontChain(defaultChain);
+    // 2) 节默认字体：无 rFonts 的文本落文档默认（而不是应用 UI 字体）
+    els.viewer.querySelectorAll('section.docx').forEach(function (sec) {
+      sec.style.fontFamily = defChain;
+    });
+    // 3) 逐 span 把字体链扩成"原名 + 伙伴槽 + 回退"（计算值已含类样式与主题变量）
+    var baseFonts = [];
+    els.viewer.querySelectorAll('section.docx').forEach(function (sec) {
+      var b = getComputedStyle(sec).fontFamily;
+      if (b && baseFonts.indexOf(b) < 0) baseFonts.push(b);
+    });
+    var spans = els.viewer.querySelectorAll('section.docx span, section.docx p');
+    for (var i = 0; i < spans.length; i++) {
+      var el = spans[i];
+      var fam = getComputedStyle(el).fontFamily;
+      if (!fam || baseFonts.indexOf(fam) >= 0) continue;
+      var exp = expandFontChain(fam);
+      if (exp && exp !== fam) el.style.fontFamily = exp;
+    }
+    // 4) 两端对齐的中文段落：按表意文字排版（avoid 拉丁 justify 的稀疏拉伸）
+    els.viewer.querySelectorAll('section.docx p').forEach(function (p) {
+      var ta = getComputedStyle(p).textAlign;
+      if (ta === 'justify') p.style.textJustify = 'inter-ideograph';
+    });
+    // 5) CJK 首行缩进（firstLineChars：百分之一字符）——docx-preview 只认 twips
+    if (state.typoBody && state.typoBody.length) {
+      var srcParas = state.typoBody;
+      var dstParas = els.viewer.querySelectorAll('section.docx article > p, section.docx article table p');
+      if (srcParas.length === dstParas.length) {   // 对不齐就整段放弃（防错位伤及无辜）
+        for (var j = 0; j < srcParas.length; j++) {
+          if (srcParas[j] > 0) dstParas[j].style.textIndent = (srcParas[j] / 100) + 'em';
+        }
+      }
+    }
+  } catch (e) { /* 排版增强失败不影响阅读 */ }
+}
+
 function enhanceNow() {
   fixHeaderWatermarks();
   fixVmlTextboxes();
+  applyTypography();
   applyTableRowHeights();
   paginateAll();
   renderFloatingAnchors();
@@ -906,7 +1096,8 @@ function bytesToB64(bytes) {
 function renderFloatingAnchors() {
   if (!state.buffer) return;
   try {
-    var zip = fflate.unzipSync(new Uint8Array(state.buffer));
+    var zip = getZipEntries();
+    if (!zip) return;
     var dec = new TextDecoder();
     var docXml = dec.decode(zip['word/document.xml']);
     var relsXml = zip['word/_rels/document.xml.rels'] ? dec.decode(zip['word/_rels/document.xml.rels']) : '';
